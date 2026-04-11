@@ -124,10 +124,7 @@ fn tile_at(tiles: &[u16], width: usize, height: usize, x: i32, y: i32) -> Option
 }
 
 fn in_bounds(width: usize, height: usize, position: (i32, i32)) -> bool {
-    position.0 >= 0
-        && position.1 >= 0
-        && position.0 < width as i32
-        && position.1 < height as i32
+    position.0 >= 0 && position.1 >= 0 && position.0 < width as i32 && position.1 < height as i32
 }
 
 fn heuristic(from: (i32, i32), to: (i32, i32)) -> u32 {
@@ -229,11 +226,7 @@ mod tests {
 
     #[test]
     fn tile_helper_uses_air_as_walkable() {
-        let tiles = vec![
-            0, 0, 0,
-            1, 1, 0,
-            0, 0, 0,
-        ];
+        let tiles = vec![0, 0, 0, 1, 1, 0, 0, 0, 0];
         let path = find_tile_path(&tiles, 3, 3, (0, 0), (2, 2)).unwrap();
         assert_eq!(path.first().copied(), Some((0, 0)));
         assert_eq!(path.last().copied(), Some((2, 2)));

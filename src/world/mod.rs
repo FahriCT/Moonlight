@@ -19,7 +19,8 @@ pub struct DecodedWorld {
 pub fn decode_gwc(world_name: Option<String>, raw: &[u8]) -> Result<DecodedWorld, String> {
     let decompressed =
         zstd::stream::decode_all(Cursor::new(raw)).map_err(|error| error.to_string())?;
-    let document = Document::from_reader(Cursor::new(decompressed)).map_err(|error| error.to_string())?;
+    let document =
+        Document::from_reader(Cursor::new(decompressed)).map_err(|error| error.to_string())?;
     parse_world_document(world_name, &document)
 }
 

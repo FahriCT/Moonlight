@@ -1,15 +1,15 @@
 use std::{path::PathBuf, sync::Arc};
 
 use axum::{
+    Json, Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -21,8 +21,9 @@ use tower_http::{
 use crate::{
     logging::{Direction, EventHub, Logger, TransportKind},
     models::{
-        ApiMessage, CreateSessionRequest, FishingStartRequest, JoinWorldRequest, MoveDirectionRequest,
-        PlaceRequest, PunchRequest, ServerEvent, SpamStartRequest, TalkRequest, WearItemRequest,
+        ApiMessage, CreateSessionRequest, FishingStartRequest, JoinWorldRequest,
+        MoveDirectionRequest, PlaceRequest, PunchRequest, ServerEvent, SpamStartRequest,
+        TalkRequest, WearItemRequest,
     },
     session::SessionManager,
 };
@@ -35,11 +36,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(
-        session_manager: SessionManager,
-        logger: Logger,
-        event_hub: Arc<EventHub>,
-    ) -> Self {
+    pub fn new(session_manager: SessionManager, logger: Logger, event_hub: Arc<EventHub>) -> Self {
         Self {
             session_manager,
             logger,
@@ -66,7 +63,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/punch", post(punch_session))
         .route("/api/sessions/{id}/place", post(place_session))
         .route("/api/sessions/{id}/wear", post(wear_item))
-        .route("/api/sessions/{id}/tutorial/automate", post(automate_tutorial))
+        .route(
+            "/api/sessions/{id}/tutorial/automate",
+            post(automate_tutorial),
+        )
         .route("/api/sessions/{id}/fishing/start", post(start_fishing))
         .route("/api/sessions/{id}/fishing/stop", post(stop_fishing))
         .route("/api/sessions/{id}/talk", post(talk))
@@ -82,7 +82,10 @@ pub fn router(state: AppState) -> Router {
                 .allow_methods([Method::GET, Method::POST])
                 .allow_headers(Any),
         )
-        .layer(middleware::from_fn_with_state(state.clone(), http_log_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            http_log_middleware,
+        ))
         .with_state(state)
 }
 
@@ -201,10 +204,7 @@ async fn disconnect_session(
         .get_session(&id)
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
-    session
-        .disconnect()
-        .await
-        .map_err(ApiError::bad_request)?;
+    session.disconnect().await.map_err(ApiError::bad_request)?;
     Ok(Json(json!({
         "result": ApiMessage { ok: true, message: "disconnect queued".to_string() },
         "session": session.snapshot().await
@@ -319,7 +319,10 @@ async fn get_minimap(
         .get_session(&id)
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
-    let minimap = session.minimap_snapshot().await.map_err(ApiError::bad_request)?;
+    let minimap = session
+        .minimap_snapshot()
+        .await
+        .map_err(ApiError::bad_request)?;
     Ok(Json(json!({ "minimap": minimap })))
 }
 
@@ -352,7 +355,10 @@ async fn stop_fishing(
         .get_session(&id)
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
-    let message = session.stop_fishing().await.map_err(ApiError::bad_request)?;
+    let message = session
+        .stop_fishing()
+        .await
+        .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
         "result": ApiMessage { ok: true, message },
         "session": session.snapshot().await
@@ -369,7 +375,10 @@ async fn talk(
         .get_session(&id)
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
-    let message = session.talk(&request.message).await.map_err(ApiError::bad_request)?;
+    let message = session
+        .talk(&request.message)
+        .await
+        .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
         "result": ApiMessage { ok: true, message },
         "session": session.snapshot().await

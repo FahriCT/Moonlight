@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bson::{doc, spec::BinarySubtype, Binary, Bson, Document};
+use bson::{Binary, Bson, Document, doc, spec::BinarySubtype};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::constants::{movement, network, protocol as ids};
@@ -145,7 +145,11 @@ fn compact_bson(value: &Bson) -> String {
         Bson::Binary(binary) => format!("<binary:{}B>", binary.bytes.len()),
         Bson::Document(document) => compact_document(document),
         Bson::Array(items) => {
-            let rendered = items.iter().map(compact_bson).collect::<Vec<_>>().join(", ");
+            let rendered = items
+                .iter()
+                .map(compact_bson)
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("[{rendered}]")
         }
         other => format!("{other:?}"),
@@ -454,11 +458,21 @@ pub fn make_move_to_map_point(map_x: i32, map_y: i32, anim: i32, direction: i32)
 pub fn make_spawn_packets(map_x: i32, map_y: i32, world_x: f64, world_y: f64) -> Vec<Document> {
     vec![
         make_map_point(map_x, map_y),
-        make_movement_packet(world_x, world_y, movement::ANIM_IDLE, movement::DIR_RIGHT, true),
+        make_movement_packet(
+            world_x,
+            world_y,
+            movement::ANIM_IDLE,
+            movement::DIR_RIGHT,
+            true,
+        ),
     ]
 }
 
-pub fn make_try_to_fish_from_map_point(target_x: i32, target_y: i32, bait_block_id: i32) -> Document {
+pub fn make_try_to_fish_from_map_point(
+    target_x: i32,
+    target_y: i32,
+    bait_block_id: i32,
+) -> Document {
     doc! {
         "ID": ids::PACKET_ID_TRY_TO_FISH_FROM_MAP_POINT,
         "x": target_x,

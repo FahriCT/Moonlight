@@ -56,19 +56,47 @@ impl Logger {
     }
 
     pub fn info(&self, scope: &str, session_id: Option<&str>, message: impl Into<String>) {
-        self.log(LogLevel::Info, None, None, scope, session_id, message.into());
+        self.log(
+            LogLevel::Info,
+            None,
+            None,
+            scope,
+            session_id,
+            message.into(),
+        );
     }
 
     pub fn warn(&self, scope: &str, session_id: Option<&str>, message: impl Into<String>) {
-        self.log(LogLevel::Warn, None, None, scope, session_id, message.into());
+        self.log(
+            LogLevel::Warn,
+            None,
+            None,
+            scope,
+            session_id,
+            message.into(),
+        );
     }
 
     pub fn error(&self, scope: &str, session_id: Option<&str>, message: impl Into<String>) {
-        self.log(LogLevel::Error, None, None, scope, session_id, message.into());
+        self.log(
+            LogLevel::Error,
+            None,
+            None,
+            scope,
+            session_id,
+            message.into(),
+        );
     }
 
     pub fn state(&self, session_id: Option<&str>, message: impl Into<String>) {
-        self.log(LogLevel::State, None, None, "session", session_id, message.into());
+        self.log(
+            LogLevel::State,
+            None,
+            None,
+            "session",
+            session_id,
+            message.into(),
+        );
     }
 
     pub fn transport(
@@ -217,9 +245,7 @@ fn format_timestamp() -> String {
     let minute = (secs_of_day % 3_600) / 60;
     let second = secs_of_day % 60;
 
-    format!(
-        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{millis:03} UTC"
-    )
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{millis:03} UTC")
 }
 
 fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
@@ -239,7 +265,7 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_log_line, Direction, LogLevel, TransportKind};
+    use super::{Direction, LogLevel, TransportKind, format_log_line};
 
     #[test]
     fn incoming_uses_requested_prefix() {

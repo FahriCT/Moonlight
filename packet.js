@@ -53,7 +53,7 @@ function writePacketToLog(direction, data, len) {
         view.setUint32(1, ts & 0xFFFFFFFF, true);
         view.setUint32(5, len, true);
 
-        const f = new File("/data/local/tmp/packets.bin", "ab");
+        const f = new File("/sdcard/packets.bin", "ab");
         f.write(header);
         f.write(data);
         f.close();

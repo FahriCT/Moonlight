@@ -24,6 +24,7 @@ pub const PACKET_ID_UNWEAR_ITEM: &str = "WeOwU";
 pub const PACKET_ID_SELECT_BELT_ITEM: &str = "BUp";
 pub const PACKET_ID_SET_BLOCK: &str = "SB";
 pub const PACKET_ID_HIT_BLOCK: &str = "HB";
+pub const PACKET_ID_DESTROY_BLOCK: &str = "DB";
 pub const PACKET_ID_SEED_BLOCK: &str = "SS";
 pub const PACKET_ID_COLLECTABLE_REQUEST: &str = "C";
 pub const PACKET_ID_COLLECTABLE_REMOVE: &str = "RC";

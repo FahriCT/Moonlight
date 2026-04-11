@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, OnceLock,
+    atomic::{AtomicU64, Ordering},
 };
 
 use std::io::Cursor;
@@ -9,13 +9,16 @@ use std::time::{Duration, Instant};
 
 use bson::Document;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{mpsc, watch, RwLock};
-use tokio::time::{interval, sleep, MissedTickBehavior};
+use tokio::sync::{RwLock, mpsc, watch};
+use tokio::time::{MissedTickBehavior, interval, sleep};
 
 use crate::auth;
 use crate::constants::{fishing, movement, network, protocol as ids, timing, tutorial};
 use crate::logging::{Direction, Logger, TransportKind};
-use crate::models::{AuthInput, InventoryItem, MinimapSnapshot, PlayerPosition, SessionSnapshot, SessionStatus, WorldSnapshot};
+use crate::models::{
+    AuthInput, InventoryItem, MinimapSnapshot, PlayerPosition, SessionSnapshot, SessionStatus,
+    TileCount, WorldSnapshot,
+};
 use crate::net;
 use crate::pathfinding::astar;
 use crate::protocol;
@@ -40,7 +43,10 @@ impl SessionManager {
     }
 
     pub async fn create_session(&self, auth: AuthInput) -> Arc<BotSession> {
-        let id = format!("session-{}", SESSION_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let id = format!(
+            "session-{}",
+            SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
         let session = BotSession::new(id.clone(), auth, self.logger.clone()).await;
         self.sessions.write().await.insert(id, session.clone());
         session
@@ -136,11 +142,15 @@ impl BotSession {
             user_id: state.user_id.clone(),
             world: state.world.clone(),
             player_position: state.player_position.clone(),
-            inventory: state.inventory.iter().map(|e| InventoryItem {
-                block_id: e.block_id,
-                inventory_type: e.inventory_type,
-                amount: e.amount,
-            }).collect(),
+            inventory: state
+                .inventory
+                .iter()
+                .map(|e| InventoryItem {
+                    block_id: e.block_id,
+                    inventory_type: e.inventory_type,
+                    amount: e.amount,
+                })
+                .collect(),
             last_error: state.last_error.clone(),
         }
     }
@@ -187,17 +197,24 @@ impl BotSession {
     }
 
     pub async fn wear_item(&self, block_id: i32, equip: bool) -> Result<String, String> {
-        self.send_command(SessionCommand::WearItem { block_id, equip }).await?;
+        self.send_command(SessionCommand::WearItem { block_id, equip })
+            .await?;
         let action = if equip { "equip" } else { "unequip" };
         Ok(format!("{action} queued for block {block_id}"))
     }
 
     pub async fn punch(&self, offset_x: i32, offset_y: i32) -> Result<String, String> {
-        self.send_command(SessionCommand::Punch { offset_x, offset_y }).await?;
+        self.send_command(SessionCommand::Punch { offset_x, offset_y })
+            .await?;
         Ok(format!("punch queued at offset ({offset_x}, {offset_y})"))
     }
 
-    pub async fn place(&self, offset_x: i32, offset_y: i32, block_id: i32) -> Result<String, String> {
+    pub async fn place(
+        &self,
+        offset_x: i32,
+        offset_y: i32,
+        block_id: i32,
+    ) -> Result<String, String> {
         self.send_command(SessionCommand::Place {
             offset_x,
             offset_y,
@@ -235,7 +252,9 @@ impl BotSession {
             bait: bait.to_string(),
         })
         .await?;
-        Ok(format!("auto-fishing queued to the {normalized} using {bait}"))
+        Ok(format!(
+            "auto-fishing queued to the {normalized} using {bait}"
+        ))
     }
 
     pub async fn stop_fishing(&self) -> Result<String, String> {
@@ -355,14 +374,17 @@ impl BotSession {
                         }
                         self.publish_snapshot().await;
                         if let Some(active) = &runtime {
-                            let _ = send_doc(&active.outbound_tx, protocol::make_join_world(&world)).await;
+                            let _ =
+                                send_doc(&active.outbound_tx, protocol::make_join_world(&world))
+                                    .await;
                         }
                     }
                     SessionCommand::LeaveWorld => {
                         stop_background_worker(&mut spam_stop_tx);
                         stop_background_worker(&mut fishing_stop_tx);
                         if let Some(active) = &runtime {
-                            let _ = send_doc(&active.outbound_tx, protocol::make_leave_world()).await;
+                            let _ =
+                                send_doc(&active.outbound_tx, protocol::make_leave_world()).await;
                         }
                         self.reset_world_state(SessionStatus::MenuReady).await;
                     }
@@ -395,7 +417,11 @@ impl BotSession {
                                 let mut state = self.state.write().await;
                                 state.tutorial_automation_running = false;
                             }
-                            self.set_error("connect the session before starting tutorial automation".to_string()).await;
+                            self.set_error(
+                                "connect the session before starting tutorial automation"
+                                    .to_string(),
+                            )
+                            .await;
                             continue;
                         };
                         let outbound_tx = active.outbound_tx.clone();
@@ -420,7 +446,10 @@ impl BotSession {
                     }
                     SessionCommand::ManualMove { direction } => {
                         let Some(active) = &runtime else {
-                            self.set_error("connect the session before sending manual movement".to_string()).await;
+                            self.set_error(
+                                "connect the session before sending manual movement".to_string(),
+                            )
+                            .await;
                             continue;
                         };
                         let outbound_tx = active.outbound_tx.clone();
@@ -429,7 +458,8 @@ impl BotSession {
                         let session_id = self.id.clone();
                         tokio::spawn(async move {
                             if let Err(error) =
-                                manual_move(&session_id, &logger, &state, &outbound_tx, &direction).await
+                                manual_move(&session_id, &logger, &state, &outbound_tx, &direction)
+                                    .await
                             {
                                 logger.error("movement", Some(&session_id), error);
                             }
@@ -437,7 +467,8 @@ impl BotSession {
                     }
                     SessionCommand::WearItem { block_id, equip } => {
                         let Some(active) = &runtime else {
-                            self.set_error("connect the session before wearing items".to_string()).await;
+                            self.set_error("connect the session before wearing items".to_string())
+                                .await;
                             continue;
                         };
                         let outbound_tx = active.outbound_tx.clone();
@@ -450,7 +481,8 @@ impl BotSession {
                     }
                     SessionCommand::Punch { offset_x, offset_y } => {
                         let Some(active) = &runtime else {
-                            self.set_error("connect the session before punching".to_string()).await;
+                            self.set_error("connect the session before punching".to_string())
+                                .await;
                             continue;
                         };
                         let outbound_tx = active.outbound_tx.clone();
@@ -458,8 +490,15 @@ impl BotSession {
                         let logger = self.logger.clone();
                         let session_id = self.id.clone();
                         tokio::spawn(async move {
-                            if let Err(error) =
-                                manual_punch(&session_id, &logger, &state, &outbound_tx, offset_x, offset_y).await
+                            if let Err(error) = manual_punch(
+                                &session_id,
+                                &logger,
+                                &state,
+                                &outbound_tx,
+                                offset_x,
+                                offset_y,
+                            )
+                            .await
                             {
                                 logger.error("punch", Some(&session_id), error);
                             }
@@ -471,7 +510,8 @@ impl BotSession {
                         block_id,
                     } => {
                         let Some(active) = &runtime else {
-                            self.set_error("connect the session before placing blocks".to_string()).await;
+                            self.set_error("connect the session before placing blocks".to_string())
+                                .await;
                             continue;
                         };
                         let outbound_tx = active.outbound_tx.clone();
@@ -479,9 +519,16 @@ impl BotSession {
                         let logger = self.logger.clone();
                         let session_id = self.id.clone();
                         tokio::spawn(async move {
-                            if let Err(error) =
-                                manual_place(&session_id, &logger, &state, &outbound_tx, offset_x, offset_y, block_id)
-                                    .await
+                            if let Err(error) = manual_place(
+                                &session_id,
+                                &logger,
+                                &state,
+                                &outbound_tx,
+                                offset_x,
+                                offset_y,
+                                block_id,
+                            )
+                            .await
                             {
                                 logger.error("place", Some(&session_id), error);
                             }
@@ -490,7 +537,10 @@ impl BotSession {
                     SessionCommand::StartFishing { direction, bait } => {
                         stop_background_worker(&mut fishing_stop_tx);
                         let Some(active) = &runtime else {
-                            self.set_error("connect the session before starting fishing".to_string()).await;
+                            self.set_error(
+                                "connect the session before starting fishing".to_string(),
+                            )
+                            .await;
                             continue;
                         };
                         let target = match self.resolve_fishing_target(&direction, &bait).await {
@@ -507,8 +557,15 @@ impl BotSession {
                         let logger = self.logger.clone();
                         let session_id = self.id.clone();
                         tokio::spawn(async move {
-                            if let Err(error) =
-                                fishing_loop(&session_id, &logger, &state, &outbound_tx, stop_rx, target).await
+                            if let Err(error) = fishing_loop(
+                                &session_id,
+                                &logger,
+                                &state,
+                                &outbound_tx,
+                                stop_rx,
+                                target,
+                            )
+                            .await
                             {
                                 logger.error("fishing", Some(&session_id), error);
                             }
@@ -517,24 +574,37 @@ impl BotSession {
                     SessionCommand::StopFishing => {
                         stop_background_worker(&mut fishing_stop_tx);
                         if let Some(active) = &runtime {
-                            let _ = send_doc(&active.outbound_tx, protocol::make_stop_fishing_game(false)).await;
-                            let _ = send_doc(&active.outbound_tx, protocol::make_stop_fishing_game(true)).await;
+                            let _ = send_doc(
+                                &active.outbound_tx,
+                                protocol::make_stop_fishing_game(false),
+                            )
+                            .await;
+                            let _ = send_doc(
+                                &active.outbound_tx,
+                                protocol::make_stop_fishing_game(true),
+                            )
+                            .await;
                         }
                         self.clear_fishing_state(None).await;
                     }
                     SessionCommand::Talk { message } => {
                         let Some(active) = &runtime else {
-                            self.set_error("connect the session before sending chat".to_string()).await;
+                            self.set_error("connect the session before sending chat".to_string())
+                                .await;
                             continue;
                         };
-                        if let Err(error) = send_world_chat(&self.id, &self.logger, &active.outbound_tx, &message).await {
+                        if let Err(error) =
+                            send_world_chat(&self.id, &self.logger, &active.outbound_tx, &message)
+                                .await
+                        {
                             self.set_error(error).await;
                         }
                     }
                     SessionCommand::StartSpam { message, delay_ms } => {
                         stop_background_worker(&mut spam_stop_tx);
                         let Some(active) = &runtime else {
-                            self.set_error("connect the session before starting spam".to_string()).await;
+                            self.set_error("connect the session before starting spam".to_string())
+                                .await;
                             continue;
                         };
                         let (stop_tx, stop_rx) = watch::channel(false);
@@ -543,8 +613,15 @@ impl BotSession {
                         let logger = self.logger.clone();
                         let session_id = self.id.clone();
                         tokio::spawn(async move {
-                            if let Err(error) =
-                                spam_loop(&session_id, &logger, &outbound_tx, stop_rx, message, delay_ms).await
+                            if let Err(error) = spam_loop(
+                                &session_id,
+                                &logger,
+                                &outbound_tx,
+                                stop_rx,
+                                message,
+                                delay_ms,
+                            )
+                            .await
                             {
                                 logger.error("spam", Some(&session_id), error);
                             }
@@ -587,7 +664,8 @@ impl BotSession {
         host_override: Option<String>,
     ) -> Result<ActiveRuntime, String> {
         self.update_status(SessionStatus::Connecting, None).await;
-        let resolved = auth::resolve_auth(self.auth.clone(), self.logger.clone(), self.id.clone()).await?;
+        let resolved =
+            auth::resolve_auth(self.auth.clone(), self.logger.clone(), self.id.clone()).await?;
         {
             let mut state = self.state.write().await;
             state.device_id = resolved.device_id.clone();
@@ -599,10 +677,13 @@ impl BotSession {
         }
         self.publish_snapshot().await;
 
-        self.update_status(SessionStatus::Authenticating, None).await;
+        self.update_status(SessionStatus::Authenticating, None)
+            .await;
         let host = self.state.read().await.current_host.clone();
-        self.logger
-            .state(Some(&self.id), format!("connecting to {host}:{}", net::default_port()));
+        self.logger.state(
+            Some(&self.id),
+            format!("connecting to {host}:{}", net::default_port()),
+        );
 
         let mut stream = net::connect_tcp(&host, net::default_port()).await?;
         self.send_and_expect(
@@ -621,12 +702,16 @@ impl BotSession {
         self.apply_profile(&gpd).await;
 
         for _ in 0..2 {
-            let _ = self.send_and_receive(&mut stream, &[protocol::make_st()]).await?;
+            let _ = self
+                .send_and_receive(&mut stream, &[protocol::make_st()])
+                .await?;
         }
         let _ = self
             .send_and_receive(&mut stream, &protocol::make_menu_transition())
             .await?;
-        let _ = self.send_and_receive(&mut stream, &protocol::make_glsi()).await?;
+        let _ = self
+            .send_and_receive(&mut stream, &protocol::make_glsi())
+            .await?;
 
         let runtime_id = RUNTIME_COUNTER.fetch_add(1, Ordering::Relaxed);
         let (read_half, write_half) = stream.into_split();
@@ -730,6 +815,12 @@ impl BotSession {
             "A" => {
                 self.maybe_apply_spawn_pot_selection(&message).await;
             }
+            ids::PACKET_ID_SET_BLOCK => {
+                self.apply_set_block_message(&message).await;
+            }
+            ids::PACKET_ID_DESTROY_BLOCK => {
+                self.apply_destroy_block_message(&message).await;
+            }
             ids::PACKET_ID_NEW_COLLECTABLE | ids::PACKET_ID_COLLECTABLE_REQUEST => {
                 self.track_collectable(&message).await;
             }
@@ -751,7 +842,11 @@ impl BotSession {
                     state.fishing.cleanup_pending = true;
                     state.fishing.last_result = Some(result.clone());
                 }
-                let _ = send_doc(&runtime.outbound_tx, protocol::make_fishing_cleanup_action()).await;
+                let _ = send_doc(
+                    &runtime.outbound_tx,
+                    protocol::make_fishing_cleanup_action(),
+                )
+                .await;
                 self.logger.state(Some(&self.id), result);
             }
             ids::PACKET_ID_STOP_MINIGAME => {
@@ -778,7 +873,12 @@ impl BotSession {
                         .get_str("WN")
                         .ok()
                         .map(ToOwned::to_owned)
-                        .or_else(|| self.state.try_read().ok().and_then(|state| state.pending_world.clone()));
+                        .or_else(|| {
+                            self.state
+                                .try_read()
+                                .ok()
+                                .and_then(|state| state.pending_world.clone())
+                        });
                     {
                         let mut state = self.state.write().await;
                         state.current_world = world.clone();
@@ -887,7 +987,8 @@ impl BotSession {
                 }
             }
             ids::PACKET_ID_ALREADY_CONNECTED => {
-                self.set_error("server reported Already Connected".to_string()).await;
+                self.set_error("server reported Already Connected".to_string())
+                    .await;
             }
             _ => {}
         }
@@ -958,18 +1059,14 @@ impl BotSession {
         let previous = state.player_position.clone();
         if let Ok(x) = message.get_f64("x") {
             state.player_position.world_x = Some(x);
-            let (map_x, _) = protocol::world_to_map(
-                x,
-                state.player_position.world_y.unwrap_or_default(),
-            );
+            let (map_x, _) =
+                protocol::world_to_map(x, state.player_position.world_y.unwrap_or_default());
             state.player_position.map_x = Some(map_x);
         }
         if let Ok(y) = message.get_f64("y") {
             state.player_position.world_y = Some(y);
-            let (_, map_y) = protocol::world_to_map(
-                state.player_position.world_x.unwrap_or_default(),
-                y,
-            );
+            let (_, map_y) =
+                protocol::world_to_map(state.player_position.world_x.unwrap_or_default(), y);
             state.player_position.map_y = Some(map_y);
         }
         let changed = state.player_position.map_x != previous.map_x
@@ -978,6 +1075,44 @@ impl BotSession {
             || state.player_position.world_y != previous.world_y;
         drop(state);
 
+        if changed {
+            self.publish_snapshot().await;
+        }
+    }
+
+    async fn apply_set_block_message(&self, message: &Document) {
+        let Ok(map_x) = message.get_i32("x") else {
+            return;
+        };
+        let Ok(map_y) = message.get_i32("y") else {
+            return;
+        };
+        let block_id = match message.get_i32("BlockType") {
+            Ok(value) if value >= 0 => value as u16,
+            _ => return,
+        };
+
+        let changed = {
+            let mut state = self.state.write().await;
+            apply_foreground_block_change(&mut state, map_x, map_y, block_id)
+        };
+        if changed {
+            self.publish_snapshot().await;
+        }
+    }
+
+    async fn apply_destroy_block_message(&self, message: &Document) {
+        let Ok(map_x) = message.get_i32("x") else {
+            return;
+        };
+        let Ok(map_y) = message.get_i32("y") else {
+            return;
+        };
+
+        let changed = {
+            let mut state = self.state.write().await;
+            apply_destroy_block_change(&mut state, map_x, map_y)
+        };
         if changed {
             self.publish_snapshot().await;
         }
@@ -1048,7 +1183,11 @@ impl BotSession {
         let Some(collectable_id) = message.get_i32("CollectableID").ok() else {
             return;
         };
-        self.state.write().await.collectables.remove(&collectable_id);
+        self.state
+            .write()
+            .await
+            .collectables
+            .remove(&collectable_id);
     }
 
     async fn apply_fishing_message(&self, message: &Document) {
@@ -1208,14 +1347,34 @@ enum SessionCommand {
     LeaveWorld,
     Disconnect,
     AutomateTutorial,
-    ManualMove { direction: String },
-    WearItem { block_id: i32, equip: bool },
-    Punch { offset_x: i32, offset_y: i32 },
-    Place { offset_x: i32, offset_y: i32, block_id: i32 },
-    StartFishing { direction: String, bait: String },
+    ManualMove {
+        direction: String,
+    },
+    WearItem {
+        block_id: i32,
+        equip: bool,
+    },
+    Punch {
+        offset_x: i32,
+        offset_y: i32,
+    },
+    Place {
+        offset_x: i32,
+        offset_y: i32,
+        block_id: i32,
+    },
+    StartFishing {
+        direction: String,
+        bait: String,
+    },
     StopFishing,
-    Talk { message: String },
-    StartSpam { message: String, delay_ms: u64 },
+    Talk {
+        message: String,
+    },
+    StartSpam {
+        message: String,
+        delay_ms: u64,
+    },
     StopSpam,
 }
 
@@ -1269,6 +1428,92 @@ fn stop_background_worker(stop_tx: &mut Option<watch::Sender<bool>>) {
     }
 }
 
+fn apply_foreground_block_change(
+    state: &mut SessionState,
+    map_x: i32,
+    map_y: i32,
+    block_id: u16,
+) -> bool {
+    let Some(world) = state.world.as_ref() else {
+        return false;
+    };
+    let Some(index) = tile_index(world, map_x, map_y) else {
+        return false;
+    };
+    let Some(tile) = state.world_foreground_tiles.get_mut(index) else {
+        return false;
+    };
+    if *tile == block_id {
+        return false;
+    }
+
+    *tile = block_id;
+    let Some(world) = state.world.as_mut() else {
+        return false;
+    };
+    world.tile_counts = summarize_tile_counts(&state.world_foreground_tiles);
+    true
+}
+
+fn apply_destroy_block_change(state: &mut SessionState, map_x: i32, map_y: i32) -> bool {
+    let Some(world) = state.world.as_ref() else {
+        return false;
+    };
+    let Some(index) = tile_index(world, map_x, map_y) else {
+        return false;
+    };
+
+    if let Some(tile) = state.world_foreground_tiles.get_mut(index) {
+        if *tile != 0 {
+            *tile = 0;
+            if let Some(world) = state.world.as_mut() {
+                world.tile_counts = summarize_tile_counts(&state.world_foreground_tiles);
+            }
+            return true;
+        }
+    }
+
+    if let Some(tile) = state.world_background_tiles.get_mut(index) {
+        if *tile != 0 {
+            *tile = 0;
+            return true;
+        }
+    }
+
+    false
+}
+
+fn tile_index(world: &WorldSnapshot, map_x: i32, map_y: i32) -> Option<usize> {
+    if map_x < 0 || map_y < 0 {
+        return None;
+    }
+
+    let width = world.width as usize;
+    let height = world.height as usize;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let map_x = map_x as usize;
+    let map_y = map_y as usize;
+    if map_x >= width || map_y >= height {
+        return None;
+    }
+
+    Some(map_y * width + map_x)
+}
+
+fn summarize_tile_counts(tiles: &[u16]) -> Vec<TileCount> {
+    let mut counts = BTreeMap::<u16, u32>::new();
+    for &tile_id in tiles {
+        *counts.entry(tile_id).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(tile_id, count)| TileCount { tile_id, count })
+        .collect()
+}
+
 fn block_names() -> &'static HashMap<u16, String> {
     BLOCK_NAMES.get_or_init(|| {
         serde_json::from_str::<HashMap<String, String>>(include_str!("../../block_types.json"))
@@ -1286,14 +1531,20 @@ fn normalize_block_name(name: &str) -> String {
         .collect()
 }
 
-fn find_inventory_bait(inventory: &[InventoryEntry], bait_query: &str) -> Result<NamedInventoryEntry, String> {
+fn find_inventory_bait(
+    inventory: &[InventoryEntry],
+    bait_query: &str,
+) -> Result<NamedInventoryEntry, String> {
     let bait_query = bait_query.trim();
     if bait_query.is_empty() {
         return Err("bait is required".to_string());
     }
 
     if let Ok(block_id) = bait_query.parse::<u16>() {
-        if let Some(item) = inventory.iter().find(|item| item.block_id == block_id && item.amount > 0) {
+        if let Some(item) = inventory
+            .iter()
+            .find(|item| item.block_id == block_id && item.amount > 0)
+        {
             return Ok(NamedInventoryEntry {
                 inventory_key: item.inventory_key,
                 block_id: item.block_id,
@@ -1352,7 +1603,9 @@ fn find_fishing_map_point(
         }
     }
 
-    Err(format!("no water tile found to the {direction} of the player"))
+    Err(format!(
+        "no water tile found to the {direction} of the player"
+    ))
 }
 
 fn rod_family_name(rod_block: Option<i32>) -> &'static str {
@@ -1400,14 +1653,19 @@ fn initialize_fishing_gauge(fishing: &mut FishingAutomationState, now: Instant) 
     fishing.sim_drag_extra = fishing::DEFAULT_DRAG_EXTRA;
     fishing.sim_run_active = false;
     fishing.sim_run_until = None;
-    fishing.sim_force_land_after = Some(now + Duration::from_secs_f64(
-        (bucket.min_land_delay + fishing::FORCE_LAND_EXTRA_DELAY_SECS).max(fishing::FORCE_LAND_MIN_SECS),
-    ));
+    fishing.sim_force_land_after = Some(
+        now + Duration::from_secs_f64(
+            (bucket.min_land_delay + fishing::FORCE_LAND_EXTRA_DELAY_SECS)
+                .max(fishing::FORCE_LAND_MIN_SECS),
+        ),
+    );
     fishing.land_sent = false;
 }
 
 fn current_fishing_land_values(fishing: &FishingAutomationState) -> (i32, i32, f64) {
-    let size_multiplier = fishing.sim_size_multiplier.clamp(0.001, fishing::MAX_SIZE_MULTIPLIER);
+    let size_multiplier = fishing
+        .sim_size_multiplier
+        .clamp(0.001, fishing::MAX_SIZE_MULTIPLIER);
     let difficulty_meter = fishing
         .sim_difficulty_meter
         .clamp(0.001, fishing::MAX_DIFFICULTY_METER);
@@ -1417,7 +1675,10 @@ fn current_fishing_land_values(fishing: &FishingAutomationState) -> (i32, i32, f
     (vendor_index, index_key, amount)
 }
 
-fn service_fishing_simulation(fishing: &mut FishingAutomationState, now: Instant) -> Option<Document> {
+fn service_fishing_simulation(
+    fishing: &mut FishingAutomationState,
+    now: Instant,
+) -> Option<Document> {
     if fishing.phase != FishingPhase::GaugeActive || fishing.cleanup_pending {
         return None;
     }
@@ -1452,10 +1713,16 @@ fn service_fishing_simulation(fishing: &mut FishingAutomationState, now: Instant
     }
 
     let run_boost = if fishing.sim_run_active { 0.22 } else { 0.0 };
-    let center = 0.5 + (base_wave + run_boost) * (fishing.sim_phase * (0.9 + move_speed * 0.55)).sin();
+    let center =
+        0.5 + (base_wave + run_boost) * (fishing.sim_phase * (0.9 + move_speed * 0.55)).sin();
     let burst = burst_wave * (fishing.sim_phase * (2.3 + move_speed * 1.1)).sin();
     let fish = (center + burst).clamp(0.0, 1.0);
-    if fishing.sim_run_active && fishing.sim_run_until.map(|until| now >= until).unwrap_or(false) {
+    if fishing.sim_run_active
+        && fishing
+            .sim_run_until
+            .map(|until| now >= until)
+            .unwrap_or(false)
+    {
         fishing.sim_run_active = false;
         fishing.sim_run_until = None;
     }
@@ -1472,10 +1739,18 @@ fn service_fishing_simulation(fishing: &mut FishingAutomationState, now: Instant
         target = fish;
     } else if should_overlap {
         let step = fishing.sim_target_speed * dt;
-        target = if fish > target { (target + step).min(fish) } else { (target - step).max(fish) };
+        target = if fish > target {
+            (target + step).min(fish)
+        } else {
+            (target - step).max(fish)
+        };
     } else {
         let step = (fishing.sim_target_speed * 0.35) * dt;
-        target = if fish > target { (target + step).min(fish) } else { (target - step).max(fish) };
+        target = if fish > target {
+            (target + step).min(fish)
+        } else {
+            (target - step).max(fish)
+        };
     }
     target = target.clamp(0.0, 1.0);
 
@@ -1497,7 +1772,8 @@ fn service_fishing_simulation(fishing: &mut FishingAutomationState, now: Instant
     }
 
     if force_finish {
-        fishing.sim_progress = (fishing.sim_progress.max(0.985) + (fishing.sim_fill_rate * 2.5).max(0.22) * dt)
+        fishing.sim_progress = (fishing.sim_progress.max(0.985)
+            + (fishing.sim_fill_rate * 2.5).max(0.22) * dt)
             .clamp(0.0, 1.0);
     } else if is_overlapping {
         fishing.sim_progress = (fishing.sim_progress + fishing.sim_fill_rate * dt).clamp(0.0, 1.0);
@@ -1526,7 +1802,11 @@ fn service_fishing_simulation(fishing: &mut FishingAutomationState, now: Instant
         {
             let (vendor_index, index_key, amount) = current_fishing_land_values(fishing);
             fishing.land_sent = true;
-            return Some(protocol::make_fishing_land_action(vendor_index, index_key, amount));
+            return Some(protocol::make_fishing_land_action(
+                vendor_index,
+                index_key,
+                amount,
+            ));
         }
     } else {
         fishing.sim_ready_since = None;
@@ -1609,14 +1889,22 @@ async fn fishing_loop(
         outbound_tx,
         vec![
             protocol::make_select_belt_item(target.bait_inventory_key),
-            protocol::make_try_to_fish_from_map_point(target.map_x, target.map_y, target.bait_block_id),
+            protocol::make_try_to_fish_from_map_point(
+                target.map_x,
+                target.map_y,
+                target.bait_block_id,
+            ),
         ],
     )
     .await?;
     sleep(Duration::from_millis(350)).await;
     send_docs(
         outbound_tx,
-        vec![protocol::make_start_fishing_game(target.map_x, target.map_y, target.bait_block_id)],
+        vec![protocol::make_start_fishing_game(
+            target.map_x,
+            target.map_y,
+            target.bait_block_id,
+        )],
     )
     .await?;
 
@@ -1796,7 +2084,6 @@ async fn scheduler_loop(
     }
 }
 
-
 fn decode_inventory(profile: &Document) -> Vec<InventoryEntry> {
     let Some(raw_pd) = protocol::binary_bytes(profile.get("pD")) else {
         return Vec::new();
@@ -1835,7 +2122,10 @@ async fn run_tutorial_script(
     controller_tx: mpsc::Sender<ControllerEvent>,
     outbound_tx: mpsc::Sender<OutboundEnvelope>,
 ) -> Result<(), String> {
-    logger.state(Some(&session_id), "starting tutorial automation from packets.bin sequence");
+    logger.state(
+        Some(&session_id),
+        "starting tutorial automation from packets.bin sequence",
+    );
 
     ensure_world(
         &session_id,
@@ -1888,7 +2178,9 @@ async fn run_tutorial_script(
     // packets.bin record 25: A { APu:[2,20] }
     send_docs(
         &outbound_tx,
-        vec![protocol::make_action_apu(&tutorial::PRE_CHARACTER_POD_SELECTION)],
+        vec![protocol::make_action_apu(
+            &tutorial::PRE_CHARACTER_POD_SELECTION,
+        )],
     )
     .await?;
     sleep(tutorial::short_pause()).await;
@@ -1956,7 +2248,10 @@ async fn run_tutorial_script(
         vec![
             protocol::make_empty_movement(),
             protocol::make_tstate(6),
-            protocol::make_activate_out_portal(tutorial::PORTAL_APPROACH_X, tutorial::PORTAL_APPROACH_Y),
+            protocol::make_activate_out_portal(
+                tutorial::PORTAL_APPROACH_X,
+                tutorial::PORTAL_APPROACH_Y,
+            ),
         ],
     )
     .await?;
@@ -2057,7 +2352,11 @@ async fn run_tutorial_script(
     .await;
 
     // Place four soil blocks (recs 388-402).
-    send_docs(&outbound_tx, vec![protocol::make_select_belt_item(soil_inventory_key)]).await?;
+    send_docs(
+        &outbound_tx,
+        vec![protocol::make_select_belt_item(soil_inventory_key)],
+    )
+    .await?;
     sleep(tutorial::short_pause()).await;
     send_docs(
         &outbound_tx,
@@ -2068,7 +2367,11 @@ async fn run_tutorial_script(
     )
     .await?;
     sleep(tutorial::short_pause()).await;
-    send_docs(&outbound_tx, vec![protocol::make_place_block(67, 40, tutorial::SOIL_BLOCK_ID)]).await?;
+    send_docs(
+        &outbound_tx,
+        vec![protocol::make_place_block(67, 40, tutorial::SOIL_BLOCK_ID)],
+    )
+    .await?;
     sleep(tutorial::short_pause()).await;
     send_docs(
         &outbound_tx,
@@ -2099,7 +2402,11 @@ async fn run_tutorial_script(
     sleep(tutorial::medium_pause()).await;
 
     // Select seed belt item, plant at farm target, then fertilize (recs 484-519).
-    send_docs(&outbound_tx, vec![protocol::make_select_belt_item(seed_inventory_key)]).await?;
+    send_docs(
+        &outbound_tx,
+        vec![protocol::make_select_belt_item(seed_inventory_key)],
+    )
+    .await?;
     sleep(tutorial::short_pause()).await;
     send_docs(
         &outbound_tx,
@@ -2115,7 +2422,11 @@ async fn run_tutorial_script(
     .await?;
     sleep(tutorial::medium_pause()).await;
 
-    send_docs(&outbound_tx, vec![protocol::make_select_belt_item(fertilizer_inventory_key)]).await?;
+    send_docs(
+        &outbound_tx,
+        vec![protocol::make_select_belt_item(fertilizer_inventory_key)],
+    )
+    .await?;
     sleep(tutorial::short_pause()).await;
     send_docs(
         &outbound_tx,
@@ -2172,14 +2483,22 @@ async fn run_tutorial_script(
     )
     .await?;
     sleep(tutorial::medium_pause()).await;
-    send_docs(&outbound_tx, vec![protocol::make_buy_item_pack(tutorial::CLOTHES_PACK_ID)]).await?;
+    send_docs(
+        &outbound_tx,
+        vec![protocol::make_buy_item_pack(tutorial::CLOTHES_PACK_ID)],
+    )
+    .await?;
     sleep(tutorial::short_pause()).await;
     // After buying the pack, send A AE=6 to advance the tutorial shop step (rec 678).
     send_docs(&outbound_tx, vec![protocol::make_action_event(6)]).await?;
     sleep(tutorial::long_pause()).await;
 
     // Return to tutorial world (rec 700) and equip the received clothes (recs 750-774).
-    send_docs(&outbound_tx, vec![protocol::make_update_location(tutorial::TUTORIAL_WORLD)]).await?;
+    send_docs(
+        &outbound_tx,
+        vec![protocol::make_update_location(tutorial::TUTORIAL_WORLD)],
+    )
+    .await?;
     sleep(tutorial::medium_pause()).await;
     for &block_id in &tutorial::EQUIP_BLOCKS {
         send_docs(&outbound_tx, vec![protocol::make_wear_item(block_id)]).await?;
@@ -2217,10 +2536,11 @@ async fn run_tutorial_script(
 
     // Poll for floating gift + BSW before spawn setup completes (rec 834).
     sleep(tutorial::short_pause()).await;
-    send_docs(&outbound_tx, vec![
-        protocol::make_floating_gift_poll(),
-        protocol::make_bsw(),
-    ]).await?;
+    send_docs(
+        &outbound_tx,
+        vec![protocol::make_floating_gift_poll(), protocol::make_bsw()],
+    )
+    .await?;
 
     // TState=3 confirms tutorial completion in PIXELSTATION (rec 838, alongside RtP).
     // RtP is already sent automatically by the rAI inbound handler.
@@ -2235,15 +2555,19 @@ async fn run_tutorial_script(
     sleep(tutorial::medium_pause()).await;
 
     // Return to menu and set up floating chest UI (rec 890).
-    send_docs(&outbound_tx, vec![
-        protocol::make_wreu(),
-        protocol::make_bcsu(),
-        protocol::make_update_location("#menu"),
-        protocol::make_ui_event_count(4),
-        protocol::make_ui_gift_view(0, 0),
-        protocol::make_ui_event_count(9),
-        protocol::make_floating_chest_refresh(),
-    ]).await?;
+    send_docs(
+        &outbound_tx,
+        vec![
+            protocol::make_wreu(),
+            protocol::make_bcsu(),
+            protocol::make_update_location("#menu"),
+            protocol::make_ui_event_count(4),
+            protocol::make_ui_gift_view(0, 0),
+            protocol::make_ui_event_count(9),
+            protocol::make_floating_chest_refresh(),
+        ],
+    )
+    .await?;
     sleep(tutorial::short_pause()).await;
 
     // gLSI handshake (rec 894).
@@ -2298,10 +2622,17 @@ async fn ensure_world(
             state.world_wiring_tiles.clear();
             state.collectables.clear();
         }
-        let eid = if world == tutorial::TUTORIAL_WORLD { "Start" } else { "" };
+        let eid = if world == tutorial::TUTORIAL_WORLD {
+            "Start"
+        } else {
+            ""
+        };
         send_docs(outbound_tx, protocol::make_enter_world_eid(world, eid)).await?;
     } else {
-        logger.state(Some(session_id), format!("joining {world} for tutorial automation"));
+        logger.state(
+            Some(session_id),
+            format!("joining {world} for tutorial automation"),
+        );
         controller_tx
             .send(ControllerEvent::Command(SessionCommand::JoinWorld(
                 world.to_string(),
@@ -2314,7 +2645,9 @@ async fn ensure_world(
     loop {
         {
             let state = state.read().await;
-            if state.current_world.as_deref() == Some(world) && state.status == SessionStatus::InWorld {
+            if state.current_world.as_deref() == Some(world)
+                && state.status == SessionStatus::InWorld
+            {
                 return Ok(());
             }
         }
@@ -2325,7 +2658,10 @@ async fn ensure_world(
     }
 }
 
-async fn send_doc(outbound_tx: &mpsc::Sender<OutboundEnvelope>, doc: Document) -> Result<(), String> {
+async fn send_doc(
+    outbound_tx: &mpsc::Sender<OutboundEnvelope>,
+    doc: Document,
+) -> Result<(), String> {
     outbound_tx
         .send(OutboundEnvelope::Single(doc))
         .await
@@ -2367,7 +2703,9 @@ async fn walk_to_map(
     };
 
     let path = planned_path(state, (start_x, start_y), (target_map_x, target_map_y)).await;
-    let steps = path.unwrap_or_else(|| fallback_straight_line_path((start_x, start_y), (target_map_x, target_map_y)));
+    let steps = path.unwrap_or_else(|| {
+        fallback_straight_line_path((start_x, start_y), (target_map_x, target_map_y))
+    });
 
     for window in steps.windows(2) {
         let [previous, current] = window else {
@@ -2392,11 +2730,7 @@ async fn walk_to_map(
         sleep(tutorial::walk_step_pause()).await;
     }
 
-    send_docs(
-        outbound_tx,
-        vec![protocol::make_empty_movement()],
-    )
-    .await?;
+    send_docs(outbound_tx, vec![protocol::make_empty_movement()]).await?;
     Ok(())
 }
 
@@ -2461,11 +2795,7 @@ async fn walk_predefined_path(
         sleep(tutorial::walk_step_pause()).await;
     }
 
-    send_docs(
-        outbound_tx,
-        vec![protocol::make_empty_movement()],
-    )
-    .await?;
+    send_docs(outbound_tx, vec![protocol::make_empty_movement()]).await?;
     Ok(())
 }
 
@@ -2476,8 +2806,7 @@ async fn manual_move(
     outbound_tx: &mpsc::Sender<OutboundEnvelope>,
     direction: &str,
 ) -> Result<(), String> {
-    let (target_map_x, target_map_y, facing_direction) =
-        next_manual_step(state, direction).await?;
+    let (target_map_x, target_map_y, facing_direction) = next_manual_step(state, direction).await?;
     let (world_x, world_y) = protocol::map_to_world(target_map_x as f64, target_map_y as f64);
     logger.info(
         "movement",
@@ -2741,11 +3070,7 @@ async fn wait_for_map_position(
     }
 }
 
-async fn movement_doc(
-    state: &Arc<RwLock<SessionState>>,
-    anim: i32,
-    direction: i32,
-) -> Document {
+async fn movement_doc(state: &Arc<RwLock<SessionState>>, anim: i32, direction: i32) -> Document {
     let state = state.read().await;
     let world_x = state.player_position.world_x.unwrap_or_else(|| {
         protocol::map_to_world(
@@ -2764,6 +3089,133 @@ async fn movement_doc(
     protocol::make_movement_packet(world_x, world_y, anim, direction, false)
 }
 
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{
+        FishingAutomationState, SessionState, apply_destroy_block_change,
+        apply_foreground_block_change,
+    };
+    use crate::models::{PlayerPosition, SessionStatus, WorldSnapshot};
+
+    fn test_state(
+        width: u32,
+        height: u32,
+        foreground_tiles: Vec<u16>,
+        background_tiles: Vec<u16>,
+    ) -> SessionState {
+        SessionState {
+            status: SessionStatus::InWorld,
+            device_id: String::new(),
+            current_host: String::new(),
+            current_port: 0,
+            current_world: Some("TEST".to_string()),
+            pending_world: None,
+            username: None,
+            user_id: None,
+            world: Some(WorldSnapshot {
+                world_name: Some("TEST".to_string()),
+                width,
+                height,
+                spawn_map_x: None,
+                spawn_map_y: None,
+                spawn_world_x: None,
+                spawn_world_y: None,
+                collectables_count: 0,
+                world_items_count: 0,
+                tile_counts: Vec::new(),
+            }),
+            world_foreground_tiles: foreground_tiles,
+            world_background_tiles: background_tiles,
+            world_water_tiles: Vec::new(),
+            world_wiring_tiles: Vec::new(),
+            player_position: PlayerPosition {
+                map_x: None,
+                map_y: None,
+                world_x: None,
+                world_y: None,
+            },
+            inventory: Vec::new(),
+            collectables: HashMap::new(),
+            last_error: None,
+            awaiting_ready: false,
+            tutorial_spawn_pod_confirmed: false,
+            tutorial_automation_running: false,
+            fishing: FishingAutomationState::default(),
+        }
+    }
+
+    #[test]
+    fn applies_block_placement_to_foreground_tiles() {
+        let mut state = test_state(3, 2, vec![0, 0, 0, 0, 0, 0], vec![0, 0, 0, 0, 0, 0]);
+
+        let changed = apply_foreground_block_change(&mut state, 1, 1, 2735);
+
+        assert!(changed);
+        assert_eq!(state.world_foreground_tiles[4], 2735);
+        let world = state.world.unwrap();
+        assert_eq!(
+            world
+                .tile_counts
+                .iter()
+                .find(|entry| entry.tile_id == 2735)
+                .unwrap()
+                .count,
+            1
+        );
+        assert_eq!(
+            world
+                .tile_counts
+                .iter()
+                .find(|entry| entry.tile_id == 0)
+                .unwrap()
+                .count,
+            5
+        );
+    }
+
+    #[test]
+    fn applies_block_removal_to_foreground_tiles() {
+        let mut state = test_state(2, 2, vec![9, 0, 0, 0], vec![0, 0, 0, 0]);
+
+        let changed = apply_foreground_block_change(&mut state, 0, 0, 0);
+
+        assert!(changed);
+        assert_eq!(state.world_foreground_tiles[0], 0);
+        let world = state.world.unwrap();
+        assert_eq!(world.tile_counts.len(), 1);
+        assert_eq!(world.tile_counts[0].tile_id, 0);
+        assert_eq!(world.tile_counts[0].count, 4);
+    }
+
+    #[test]
+    fn destroy_clears_background_when_foreground_is_already_empty() {
+        let mut state = test_state(2, 2, vec![0, 0, 0, 0], vec![7, 0, 0, 0]);
+
+        let changed = apply_destroy_block_change(&mut state, 0, 0);
+
+        assert!(changed);
+        assert_eq!(state.world_foreground_tiles[0], 0);
+        assert_eq!(state.world_background_tiles[0], 0);
+    }
+
+    #[test]
+    fn destroy_prefers_foreground_before_background() {
+        let mut state = test_state(2, 2, vec![9, 0, 0, 0], vec![7, 0, 0, 0]);
+
+        let changed = apply_destroy_block_change(&mut state, 0, 0);
+
+        assert!(changed);
+        assert_eq!(state.world_foreground_tiles[0], 0);
+        assert_eq!(state.world_background_tiles[0], 7);
+        let world = state.world.unwrap();
+        assert_eq!(world.tile_counts.len(), 1);
+        assert_eq!(world.tile_counts[0].tile_id, 0);
+        assert_eq!(world.tile_counts[0].count, 4);
+    }
+}
+
 async fn inventory_key_for(
     state: &Arc<RwLock<SessionState>>,
     block_id: u16,
@@ -2776,7 +3228,9 @@ async fn inventory_key_for(
         .iter()
         .find(|entry| {
             entry.block_id == block_id
-                && inventory_type.map(|expected| entry.inventory_type == expected).unwrap_or(true)
+                && inventory_type
+                    .map(|expected| entry.inventory_type == expected)
+                    .unwrap_or(true)
                 && entry.amount > 0
         })
         .map(|entry| entry.inventory_key)
@@ -2831,11 +3285,15 @@ async fn set_local_map_position(
             user_id: state.user_id.clone(),
             world: state.world.clone(),
             player_position: state.player_position.clone(),
-            inventory: state.inventory.iter().map(|e| InventoryItem {
-                block_id: e.block_id,
-                inventory_type: e.inventory_type,
-                amount: e.amount,
-            }).collect(),
+            inventory: state
+                .inventory
+                .iter()
+                .map(|e| InventoryItem {
+                    block_id: e.block_id,
+                    inventory_type: e.inventory_type,
+                    amount: e.amount,
+                })
+                .collect(),
             last_error: state.last_error.clone(),
         }
     };
@@ -2872,7 +3330,9 @@ async fn collect_all_visible_collectables(
         .await?;
         send_docs(
             outbound_tx,
-            vec![protocol::make_collectable_request(collectable.collectable_id)],
+            vec![protocol::make_collectable_request(
+                collectable.collectable_id,
+            )],
         )
         .await?;
         sleep(Duration::from_millis(250)).await;

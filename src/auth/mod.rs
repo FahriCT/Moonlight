@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::constants::{network, timing};
 use crate::logging::{Direction, Logger, TransportKind};
@@ -23,7 +23,8 @@ pub async fn resolve_auth(
         AuthInput::AndroidDevice { device_id } => {
             let device_id = normalize_or_generate_device_id(device_id);
             let ticket =
-                playfab_android_login(device_id.clone(), logger.clone(), session_id.clone()).await?;
+                playfab_android_login(device_id.clone(), logger.clone(), session_id.clone())
+                    .await?;
             let jwt = exchange_ticket(ticket, logger, session_id).await?;
             Ok(ResolvedAuth { jwt, device_id })
         }
@@ -97,7 +98,10 @@ async fn exchange_ticket(
                 "X-Sf-Client-Api-Key".to_string(),
                 network::SOCIALFIRST_API_KEY.to_string(),
             ),
-            ("X-Unity-Version".to_string(), network::UNITY_VERSION.to_string()),
+            (
+                "X-Unity-Version".to_string(),
+                network::UNITY_VERSION.to_string(),
+            ),
         ],
         logger,
         session_id,
@@ -136,7 +140,9 @@ async fn post_json(
             request = request.header(&key, &value);
         }
 
-        let mut response = request.send_json(&body).map_err(|error| error.to_string())?;
+        let mut response = request
+            .send_json(&body)
+            .map_err(|error| error.to_string())?;
         let status = response.status();
         let parsed: Value = response
             .body_mut()
