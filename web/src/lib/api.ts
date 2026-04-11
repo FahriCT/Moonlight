@@ -3,6 +3,7 @@ import type {
   ApiMessage,
   AuthInput,
   BlockNameMap,
+  LuaScriptStatusSnapshot,
   MinimapSnapshot,
   SessionSnapshot,
 } from "@/lib/types"
@@ -20,6 +21,10 @@ type SessionsResponse = {
 
 type MinimapResponse = {
   minimap?: MinimapSnapshot | null
+}
+
+type LuaStatusResponse = {
+  status?: LuaScriptStatusSnapshot | null
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -132,4 +137,21 @@ export function stopSpam(sessionId: string) {
 
 export function loadBlockTypes() {
   return request<BlockNameMap>("/block_types.json")
+}
+
+export function startLuaScript(sessionId: string, source: string) {
+  return request<ActionResponse & LuaStatusResponse>(`/api/sessions/${sessionId}/lua/start`, {
+    method: "POST",
+    body: JSON.stringify({ source }),
+  })
+}
+
+export function stopLuaScript(sessionId: string) {
+  return request<ActionResponse & LuaStatusResponse>(`/api/sessions/${sessionId}/lua/stop`, {
+    method: "POST",
+  })
+}
+
+export function getLuaScriptStatus(sessionId: string) {
+  return request<LuaStatusResponse>(`/api/sessions/${sessionId}/lua/status?ts=${Date.now()}`)
 }

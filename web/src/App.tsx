@@ -51,8 +51,11 @@ import {
   listSessions,
   loadBlockTypes,
   moveSession,
+  getLuaScriptStatus,
   startFishing,
+  startLuaScript,
   startSpam,
+  stopLuaScript,
   stopFishing,
   stopSpam,
   talk,
@@ -73,6 +76,7 @@ import type {
   AuthKind,
   BlockNameMap,
   LogEvent,
+  LuaScriptStatusSnapshot,
   MinimapSnapshot,
   ServerEvent,
   SessionSnapshot,
@@ -88,6 +92,7 @@ type SessionInputs = {
   world: string
   bait: string
   chat: string
+  luaSource: string
   spam: string
   spamDelay: string
 }
@@ -96,6 +101,7 @@ const EMPTY_INPUTS: SessionInputs = {
   world: "",
   bait: "",
   chat: "",
+  luaSource: "",
   spam: "",
   spamDelay: "5",
 }
@@ -240,6 +246,9 @@ function App() {
   const [sessions, setSessions] = useState<SessionSnapshot[]>([])
   const [sessionInputs, setSessionInputs] = useState<Record<string, SessionInputs>>({})
   const [minimaps, setMinimaps] = useState<Record<string, MinimapSnapshot | null>>({})
+  const [luaStatuses, setLuaStatuses] = useState<Record<string, LuaScriptStatusSnapshot | null>>(
+    {},
+  )
   const [hoverTiles, setHoverTiles] = useState<Record<string, string>>({})
   const [logs, setLogs] = useState<LogEvent[]>([])
   const [blockNames, setBlockNames] = useState<BlockNameMap>({})
@@ -391,6 +400,21 @@ function App() {
     }
   }, [])
 
+  const refreshLuaStatus = useCallback(async (sessionId: string) => {
+    try {
+      const payload = await getLuaScriptStatus(sessionId)
+      setLuaStatuses((current) => ({
+        ...current,
+        [sessionId]: payload.status ?? null,
+      }))
+    } catch {
+      setLuaStatuses((current) => ({
+        ...current,
+        [sessionId]: null,
+      }))
+    }
+  }, [])
+
   useEffect(() => {
     sessions.forEach((session) => {
       if (
@@ -405,6 +429,12 @@ function App() {
     })
   }, [refreshMinimap, sessions])
 
+  useEffect(() => {
+    sessions.forEach((session) => {
+      void refreshLuaStatus(session.id)
+    })
+  }, [refreshLuaStatus, sessions])
+
   const runAction = useCallback(
     async (action: () => Promise<ActionResponse>) => {
       try {
@@ -418,6 +448,31 @@ function App() {
       }
     },
     [updateFromAction],
+  )
+
+  const runLuaAction = useCallback(
+    async (
+      sessionId: string,
+      action: () => Promise<{ result?: { message?: string }; status?: LuaScriptStatusSnapshot | null }>,
+    ) => {
+      try {
+        const response = await action()
+        if (response.result?.message) {
+          setFeedback({ kind: "success", message: response.result.message })
+        }
+        setLuaStatuses((current) => ({
+          ...current,
+          [sessionId]: response.status ?? current[sessionId] ?? null,
+        }))
+        await refreshLuaStatus(sessionId)
+      } catch (error) {
+        setFeedback({
+          kind: "error",
+          message: error instanceof Error ? error.message : "request failed",
+        })
+      }
+    },
+    [refreshLuaStatus],
   )
 
   useEffect(() => {
@@ -490,6 +545,9 @@ function App() {
     }
     return delayMs
   }
+
+  const formatLuaTime = (timestampMs: number | null) =>
+    timestampMs ? new Date(timestampMs).toISOString().replace("T", " ").replace("Z", " UTC") : "-"
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,#14212f_0%,#0d141c_45%,#081018_100%)] text-foreground">
@@ -1029,6 +1087,80 @@ function App() {
                                   Stop Spam
                                 </Button>
                               </div>
+                              </div>
+                            </div>
+                              <div className="grid gap-3 rounded-2xl border border-white/10 bg-white/3 p-3">
+                            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-muted-foreground">
+                              <Bug className="size-3.5" />
+                              Lua Script
+                            </div>
+                            <Textarea
+                              value={inputs.luaSource}
+                              onChange={(event) =>
+                                mutateSessionInput(session.id, "luaSource", event.target.value)
+                              }
+                              rows={10}
+                              placeholder={"bot:talk(\"hello\")\nbot:sleep(500)\nlocal world = bot:getWorld()"}
+                              className="rounded-xl border-white/10 bg-white/5 font-mono text-[11px]"
+                            />
+                            <div className="grid gap-1 rounded-xl border border-white/10 bg-white/4 p-3 text-xs text-muted-foreground">
+                              <div>
+                                Status:{" "}
+                                <span
+                                  className={
+                                    luaStatuses[session.id]?.running
+                                      ? "text-emerald-300"
+                                      : "text-slate-200"
+                                  }
+                                >
+                                  {luaStatuses[session.id]?.running ? "running" : "idle"}
+                                </span>
+                              </div>
+                              <div>
+                                Started: {formatLuaTime(luaStatuses[session.id]?.started_at ?? null)}
+                              </div>
+                              <div>
+                                Finished: {formatLuaTime(luaStatuses[session.id]?.finished_at ?? null)}
+                              </div>
+                              <div>
+                                Last Result: {luaStatuses[session.id]?.last_result_message ?? "-"}
+                              </div>
+                              <div
+                                className={
+                                  luaStatuses[session.id]?.last_error ? "text-rose-300" : undefined
+                                }
+                              >
+                                Last Error: {luaStatuses[session.id]?.last_error ?? "-"}
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                              <Button
+                                variant="outline"
+                                className="rounded-xl border-white/10 bg-white/5"
+                                onClick={() =>
+                                  void runLuaAction(session.id, () =>
+                                    startLuaScript(session.id, inputs.luaSource),
+                                  )
+                                }
+                              >
+                                Run Script
+                              </Button>
+                              <Button
+                                variant="outline"
+                                className="rounded-xl border-white/10 bg-white/5"
+                                onClick={() =>
+                                  void runLuaAction(session.id, () => stopLuaScript(session.id))
+                                }
+                              >
+                                Stop Script
+                              </Button>
+                              <Button
+                                variant="outline"
+                                className="rounded-xl border-white/10 bg-white/5"
+                                onClick={() => void refreshLuaStatus(session.id)}
+                              >
+                                Refresh
+                              </Button>
                             </div>
                               </div>
                             </div>

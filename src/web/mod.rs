@@ -22,8 +22,8 @@ use crate::{
     logging::{Direction, EventHub, Logger, TransportKind},
     models::{
         ApiMessage, CreateSessionRequest, FishingStartRequest, JoinWorldRequest,
-        MoveDirectionRequest, PlaceRequest, PunchRequest, ServerEvent, SpamStartRequest,
-        TalkRequest, WearItemRequest,
+        LuaScriptStartRequest, MoveDirectionRequest, PlaceRequest, PunchRequest, ServerEvent,
+        SpamStartRequest, TalkRequest, WearItemRequest,
     },
     session::SessionManager,
 };
@@ -72,6 +72,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/talk", post(talk))
         .route("/api/sessions/{id}/spam/start", post(start_spam))
         .route("/api/sessions/{id}/spam/stop", post(stop_spam))
+        .route("/api/sessions/{id}/lua/start", post(start_lua_script))
+        .route("/api/sessions/{id}/lua/stop", post(stop_lua_script))
+        .route("/api/sessions/{id}/lua/status", get(get_lua_status))
         .route("/api/sessions/{id}/minimap", get(get_minimap))
         .route("/ws", get(websocket_handler))
         .route_service("/block_types.json", ServeFile::new(block_types_file))
@@ -222,7 +225,7 @@ async fn move_session(
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
     let message = session
-        .move_direction(&request.direction)
+        .queue_move_direction(&request.direction)
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
@@ -242,7 +245,7 @@ async fn wear_item(
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
     let message = session
-        .wear_item(request.block_id, request.equip)
+        .queue_wear_item(request.block_id, request.equip)
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
@@ -262,7 +265,7 @@ async fn punch_session(
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
     let message = session
-        .punch(request.offset_x, request.offset_y)
+        .queue_punch(request.offset_x, request.offset_y)
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
@@ -282,7 +285,7 @@ async fn place_session(
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
     let message = session
-        .place(request.offset_x, request.offset_y, request.block_id)
+        .queue_place(request.offset_x, request.offset_y, request.block_id)
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
@@ -337,7 +340,7 @@ async fn start_fishing(
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
     let message = session
-        .start_fishing(&request.direction, &request.bait)
+        .queue_start_fishing(&request.direction, &request.bait)
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
@@ -356,7 +359,7 @@ async fn stop_fishing(
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
     let message = session
-        .stop_fishing()
+        .queue_stop_fishing()
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
@@ -376,7 +379,7 @@ async fn talk(
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
     let message = session
-        .talk(&request.message)
+        .queue_talk(&request.message)
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
@@ -396,7 +399,7 @@ async fn start_spam(
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
     let message = session
-        .start_spam(&request.message, request.delay_ms)
+        .queue_start_spam(&request.message, request.delay_ms)
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
@@ -414,11 +417,57 @@ async fn stop_spam(
         .get_session(&id)
         .await
         .ok_or_else(|| ApiError::not_found("session not found"))?;
-    let message = session.stop_spam().await.map_err(ApiError::bad_request)?;
+    let message = session
+        .queue_stop_spam()
+        .await
+        .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
         "result": ApiMessage { ok: true, message },
         "session": session.snapshot().await
     })))
+}
+
+async fn start_lua_script(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<LuaScriptStartRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let status = state
+        .session_manager
+        .start_lua_script(&id, request.source)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "result": ApiMessage { ok: true, message: "lua script started".to_string() },
+        "status": status
+    })))
+}
+
+async fn stop_lua_script(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let status = state
+        .session_manager
+        .stop_lua_script(&id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "result": ApiMessage { ok: true, message: "lua stop requested".to_string() },
+        "status": status
+    })))
+}
+
+async fn get_lua_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let status = state
+        .session_manager
+        .lua_script_status(&id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "status": status })))
 }
 
 async fn websocket_handler(

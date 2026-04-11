@@ -83,6 +83,72 @@ pub struct MinimapSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaCollectableSnapshot {
+    pub id: i32,
+    pub block_type: i32,
+    pub amount: i32,
+    pub inventory_type: i32,
+    pub pos_x: f64,
+    pub pos_y: f64,
+    pub is_gem: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaGrowingTileSnapshot {
+    pub x: i32,
+    pub y: i32,
+    pub block_id: u16,
+    pub growth_end_time: i64,
+    pub growth_duration_secs: i32,
+    pub mixed: bool,
+    pub harvest_seeds: i32,
+    pub harvest_blocks: i32,
+    pub harvest_gems: i32,
+    pub harvest_extra_blocks: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaTileSnapshot {
+    pub foreground: u16,
+    pub background: u16,
+    pub water: u16,
+    pub wiring: u16,
+    pub ready_to_harvest: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaWorldSpawnSnapshot {
+    pub map_x: Option<f64>,
+    pub map_y: Option<f64>,
+    pub world_x: Option<f64>,
+    pub world_y: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaWorldTilesSnapshot {
+    pub foreground: Vec<u16>,
+    pub background: Vec<u16>,
+    pub water: Vec<u16>,
+    pub wiring: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaWorldObjectsSnapshot {
+    pub collectables: Vec<LuaCollectableSnapshot>,
+    pub growing_tiles: Vec<LuaGrowingTileSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaWorldSnapshot {
+    pub name: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub spawn: LuaWorldSpawnSnapshot,
+    pub tiles: LuaWorldTilesSnapshot,
+    pub objects: LuaWorldObjectsSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub id: String,
     pub status: SessionStatus,
@@ -188,4 +254,18 @@ pub struct TalkRequest {
 pub struct SpamStartRequest {
     pub message: String,
     pub delay_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaScriptStartRequest {
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaScriptStatusSnapshot {
+    pub running: bool,
+    pub started_at: Option<u128>,
+    pub finished_at: Option<u128>,
+    pub last_error: Option<String>,
+    pub last_result_message: Option<String>,
 }

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicU64, Ordering},
@@ -15,9 +16,12 @@ use tokio::time::{MissedTickBehavior, interval, sleep};
 use crate::auth;
 use crate::constants::{fishing, movement, network, protocol as ids, timing, tutorial};
 use crate::logging::{Direction, Logger, TransportKind};
+use crate::lua_runtime::{self, LuaScriptHandle};
 use crate::models::{
-    AuthInput, InventoryItem, MinimapSnapshot, PlayerPosition, SessionSnapshot, SessionStatus,
-    TileCount, WorldSnapshot,
+    AuthInput, InventoryItem, LuaCollectableSnapshot, LuaGrowingTileSnapshot,
+    LuaScriptStatusSnapshot, LuaTileSnapshot, LuaWorldObjectsSnapshot, LuaWorldSnapshot,
+    LuaWorldSpawnSnapshot, LuaWorldTilesSnapshot, MinimapSnapshot, PlayerPosition, SessionSnapshot,
+    SessionStatus, TileCount, WorldSnapshot,
 };
 use crate::net;
 use crate::pathfinding::astar;
@@ -31,6 +35,7 @@ static BLOCK_NAMES: OnceLock<HashMap<u16, String>> = OnceLock::new();
 #[derive(Debug, Clone)]
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<String, Arc<BotSession>>>>,
+    lua_scripts: Arc<RwLock<HashMap<String, LuaScriptHandle>>>,
     logger: Logger,
 }
 
@@ -38,6 +43,7 @@ impl SessionManager {
     pub fn new(logger: Logger) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            lua_scripts: Arc::new(RwLock::new(HashMap::new())),
             logger,
         }
     }
@@ -64,6 +70,52 @@ impl SessionManager {
         }
         items
     }
+
+    pub async fn start_lua_script(
+        &self,
+        session_id: &str,
+        source: String,
+    ) -> Result<LuaScriptStatusSnapshot, String> {
+        let session = self
+            .get_session(session_id)
+            .await
+            .ok_or_else(|| "session not found".to_string())?;
+        self.stop_lua_script(session_id).await?;
+        let handle = lua_runtime::spawn_script(session, source, self.logger.clone());
+        let status = handle.status.read().await.clone();
+        self.lua_scripts
+            .write()
+            .await
+            .insert(session_id.to_string(), handle);
+        Ok(status)
+    }
+
+    pub async fn stop_lua_script(
+        &self,
+        session_id: &str,
+    ) -> Result<LuaScriptStatusSnapshot, String> {
+        if let Some(handle) = self.lua_scripts.write().await.remove(session_id) {
+            handle.cancel.store(true, AtomicOrdering::Relaxed);
+            handle.task.abort();
+            Ok(handle.status.read().await.clone())
+        } else {
+            Ok(lua_runtime::idle_status())
+        }
+    }
+
+    pub async fn lua_script_status(
+        &self,
+        session_id: &str,
+    ) -> Result<LuaScriptStatusSnapshot, String> {
+        self.get_session(session_id)
+            .await
+            .ok_or_else(|| "session not found".to_string())?;
+        if let Some(handle) = self.lua_scripts.read().await.get(session_id) {
+            Ok(handle.status.read().await.clone())
+        } else {
+            Ok(lua_runtime::idle_status())
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -76,6 +128,10 @@ pub struct BotSession {
 }
 
 impl BotSession {
+    pub(crate) fn id_string(&self) -> String {
+        self.id.clone()
+    }
+
     async fn new(id: String, auth: AuthInput, logger: Logger) -> Arc<Self> {
         let (controller_tx, controller_rx) = mpsc::channel(512);
         let device_id = auth.device_id();
@@ -97,6 +153,7 @@ impl BotSession {
             world_background_tiles: Vec::new(),
             world_water_tiles: Vec::new(),
             world_wiring_tiles: Vec::new(),
+            current_outbound_tx: None,
             growing_tiles: HashMap::new(),
             player_position: PlayerPosition {
                 map_x: None,
@@ -202,20 +259,20 @@ impl BotSession {
         is_tile_ready_to_harvest_at(&state, map_x, map_y, protocol::csharp_ticks())
     }
 
-    pub async fn wear_item(&self, block_id: i32, equip: bool) -> Result<String, String> {
+    pub async fn queue_wear_item(&self, block_id: i32, equip: bool) -> Result<String, String> {
         self.send_command(SessionCommand::WearItem { block_id, equip })
             .await?;
         let action = if equip { "equip" } else { "unequip" };
         Ok(format!("{action} queued for block {block_id}"))
     }
 
-    pub async fn punch(&self, offset_x: i32, offset_y: i32) -> Result<String, String> {
+    pub async fn queue_punch(&self, offset_x: i32, offset_y: i32) -> Result<String, String> {
         self.send_command(SessionCommand::Punch { offset_x, offset_y })
             .await?;
         Ok(format!("punch queued at offset ({offset_x}, {offset_y})"))
     }
 
-    pub async fn place(
+    pub async fn queue_place(
         &self,
         offset_x: i32,
         offset_y: i32,
@@ -232,7 +289,7 @@ impl BotSession {
         ))
     }
 
-    pub async fn move_direction(&self, direction: &str) -> Result<String, String> {
+    pub async fn queue_move_direction(&self, direction: &str) -> Result<String, String> {
         let normalized = direction.trim().to_ascii_lowercase();
         if !matches!(normalized.as_str(), "left" | "right" | "up" | "down") {
             return Err("direction must be left, right, up, or down".to_string());
@@ -244,7 +301,7 @@ impl BotSession {
         Ok(format!("queued 1 step {normalized}"))
     }
 
-    pub async fn start_fishing(&self, direction: &str, bait: &str) -> Result<String, String> {
+    pub async fn queue_start_fishing(&self, direction: &str, bait: &str) -> Result<String, String> {
         let normalized = direction.trim().to_ascii_lowercase();
         if !matches!(normalized.as_str(), "left" | "right") {
             return Err("fishing direction must be left or right".to_string());
@@ -263,12 +320,12 @@ impl BotSession {
         ))
     }
 
-    pub async fn stop_fishing(&self) -> Result<String, String> {
+    pub async fn queue_stop_fishing(&self) -> Result<String, String> {
         self.send_command(SessionCommand::StopFishing).await?;
         Ok("fishing stop queued".to_string())
     }
 
-    pub async fn talk(&self, message: &str) -> Result<String, String> {
+    pub async fn queue_talk(&self, message: &str) -> Result<String, String> {
         let message = message.trim();
         if message.is_empty() {
             return Err("message is required".to_string());
@@ -280,7 +337,7 @@ impl BotSession {
         Ok("chat message queued".to_string())
     }
 
-    pub async fn start_spam(&self, message: &str, delay_ms: u64) -> Result<String, String> {
+    pub async fn queue_start_spam(&self, message: &str, delay_ms: u64) -> Result<String, String> {
         let message = message.trim();
         if message.is_empty() {
             return Err("message is required".to_string());
@@ -299,9 +356,308 @@ impl BotSession {
         Ok(format!("spam loop queued at {delay_ms}ms"))
     }
 
-    pub async fn stop_spam(&self) -> Result<String, String> {
+    pub async fn queue_stop_spam(&self) -> Result<String, String> {
         self.send_command(SessionCommand::StopSpam).await?;
         Ok("spam stop queued".to_string())
+    }
+
+    pub(crate) async fn walk(
+        &self,
+        offset_x: i32,
+        offset_y: i32,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        ensure_not_cancelled(cancel)?;
+        let (target_x, target_y) = {
+            let state = self.state.read().await;
+            (
+                state
+                    .player_position
+                    .map_x
+                    .ok_or_else(|| "player map x is not known yet".to_string())?
+                    .round() as i32
+                    + offset_x,
+                state
+                    .player_position
+                    .map_y
+                    .ok_or_else(|| "player map y is not known yet".to_string())?
+                    .round() as i32
+                    + offset_y,
+            )
+        };
+        self.walk_to(target_x, target_y, cancel).await
+    }
+
+    pub(crate) async fn walk_to(
+        &self,
+        map_x: i32,
+        map_y: i32,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        ensure_not_cancelled(cancel)?;
+        let outbound_tx = self
+            .state
+            .read()
+            .await
+            .current_outbound_tx
+            .clone()
+            .ok_or_else(|| "connect the session before walking".to_string())?;
+        walk_to_map_cancellable(&self.state, &outbound_tx, map_x, map_y, cancel).await
+    }
+
+    pub(crate) async fn find_path(
+        &self,
+        map_x: i32,
+        map_y: i32,
+    ) -> Result<Vec<(i32, i32)>, String> {
+        let (start_x, start_y) = {
+            let state = self.state.read().await;
+            (
+                state
+                    .player_position
+                    .map_x
+                    .ok_or_else(|| "player map x is not known yet".to_string())?
+                    .round() as i32,
+                state
+                    .player_position
+                    .map_y
+                    .ok_or_else(|| "player map y is not known yet".to_string())?
+                    .round() as i32,
+            )
+        };
+
+        Ok(
+            planned_path(&self.state, (start_x, start_y), (map_x, map_y))
+                .await
+                .unwrap_or_else(|| fallback_straight_line_path((start_x, start_y), (map_x, map_y))),
+        )
+    }
+
+    pub(crate) async fn punch(
+        &self,
+        offset_x: i32,
+        offset_y: i32,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        ensure_not_cancelled(cancel)?;
+        let outbound_tx = self
+            .state
+            .read()
+            .await
+            .current_outbound_tx
+            .clone()
+            .ok_or_else(|| "connect the session before punching".to_string())?;
+        manual_punch(
+            &self.id,
+            &self.logger,
+            &self.state,
+            &outbound_tx,
+            offset_x,
+            offset_y,
+        )
+        .await
+    }
+
+    pub(crate) async fn place(
+        &self,
+        offset_x: i32,
+        offset_y: i32,
+        block_id: i32,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        ensure_not_cancelled(cancel)?;
+        let outbound_tx = self
+            .state
+            .read()
+            .await
+            .current_outbound_tx
+            .clone()
+            .ok_or_else(|| "connect the session before placing blocks".to_string())?;
+        manual_place(
+            &self.id,
+            &self.logger,
+            &self.state,
+            &outbound_tx,
+            offset_x,
+            offset_y,
+            block_id,
+        )
+        .await
+    }
+
+    pub(crate) async fn wear(
+        &self,
+        block_id: i32,
+        equip: bool,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        ensure_not_cancelled(cancel)?;
+        let outbound_tx = self
+            .state
+            .read()
+            .await
+            .current_outbound_tx
+            .clone()
+            .ok_or_else(|| "connect the session before wearing items".to_string())?;
+        let packet = if equip {
+            protocol::make_wear_item(block_id)
+        } else {
+            protocol::make_unwear_item(block_id)
+        };
+        send_doc(&outbound_tx, packet).await
+    }
+
+    pub(crate) async fn talk(&self, message: &str, cancel: &AtomicBool) -> Result<(), String> {
+        ensure_not_cancelled(cancel)?;
+        let outbound_tx = self
+            .state
+            .read()
+            .await
+            .current_outbound_tx
+            .clone()
+            .ok_or_else(|| "connect the session before sending chat".to_string())?;
+        send_world_chat(&self.id, &self.logger, &outbound_tx, message).await
+    }
+
+    pub(crate) async fn collect(&self, cancel: &AtomicBool) -> Result<(), String> {
+        ensure_not_cancelled(cancel)?;
+        let outbound_tx = self
+            .state
+            .read()
+            .await
+            .current_outbound_tx
+            .clone()
+            .ok_or_else(|| "connect the session before collecting".to_string())?;
+        collect_all_visible_collectables_cancellable(&self.state, &outbound_tx, cancel).await
+    }
+
+    pub(crate) async fn send_packet(
+        &self,
+        packet: Document,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        ensure_not_cancelled(cancel)?;
+        let outbound_tx = self
+            .state
+            .read()
+            .await
+            .current_outbound_tx
+            .clone()
+            .ok_or_else(|| "connect the session before sending packets".to_string())?;
+        send_doc(&outbound_tx, packet).await
+    }
+
+    pub(crate) async fn position(&self) -> PlayerPosition {
+        self.state.read().await.player_position.clone()
+    }
+
+    pub(crate) async fn current_world(&self) -> Option<String> {
+        self.state.read().await.current_world.clone()
+    }
+
+    pub(crate) async fn is_in_world(&self) -> bool {
+        self.state.read().await.status == SessionStatus::InWorld
+    }
+
+    pub(crate) async fn inventory_count(&self, block_id: u16) -> u32 {
+        self.state
+            .read()
+            .await
+            .inventory
+            .iter()
+            .filter(|entry| entry.block_id == block_id)
+            .map(|entry| entry.amount as u32)
+            .sum()
+    }
+
+    pub(crate) async fn collectables(&self) -> Vec<LuaCollectableSnapshot> {
+        let mut collectables = self
+            .state
+            .read()
+            .await
+            .collectables
+            .values()
+            .cloned()
+            .map(|item| LuaCollectableSnapshot {
+                id: item.collectable_id,
+                block_type: item.block_type,
+                amount: item.amount,
+                inventory_type: item.inventory_type,
+                pos_x: item.pos_x,
+                pos_y: item.pos_y,
+                is_gem: item.is_gem,
+            })
+            .collect::<Vec<_>>();
+        collectables.sort_by_key(|item| item.id);
+        collectables
+    }
+
+    pub(crate) async fn world(&self) -> Result<LuaWorldSnapshot, String> {
+        let state = self.state.read().await;
+        let world = state
+            .world
+            .as_ref()
+            .ok_or_else(|| "no world loaded yet".to_string())?;
+        let mut growing_tiles = state
+            .growing_tiles
+            .iter()
+            .map(|(&(x, y), item)| LuaGrowingTileSnapshot {
+                x,
+                y,
+                block_id: item.block_id,
+                growth_end_time: item.growth_end_time,
+                growth_duration_secs: item.growth_duration_secs,
+                mixed: item.mixed,
+                harvest_seeds: item.harvest_seeds,
+                harvest_blocks: item.harvest_blocks,
+                harvest_gems: item.harvest_gems,
+                harvest_extra_blocks: item.harvest_extra_blocks,
+            })
+            .collect::<Vec<_>>();
+        growing_tiles.sort_by_key(|item| (item.y, item.x));
+
+        let mut collectables = state
+            .collectables
+            .values()
+            .cloned()
+            .map(|item| LuaCollectableSnapshot {
+                id: item.collectable_id,
+                block_type: item.block_type,
+                amount: item.amount,
+                inventory_type: item.inventory_type,
+                pos_x: item.pos_x,
+                pos_y: item.pos_y,
+                is_gem: item.is_gem,
+            })
+            .collect::<Vec<_>>();
+        collectables.sort_by_key(|item| item.id);
+
+        Ok(LuaWorldSnapshot {
+            name: world.world_name.clone(),
+            width: world.width,
+            height: world.height,
+            spawn: LuaWorldSpawnSnapshot {
+                map_x: world.spawn_map_x,
+                map_y: world.spawn_map_y,
+                world_x: world.spawn_world_x,
+                world_y: world.spawn_world_y,
+            },
+            tiles: LuaWorldTilesSnapshot {
+                foreground: state.world_foreground_tiles.clone(),
+                background: state.world_background_tiles.clone(),
+                water: state.world_water_tiles.clone(),
+                wiring: state.world_wiring_tiles.clone(),
+            },
+            objects: LuaWorldObjectsSnapshot {
+                collectables,
+                growing_tiles,
+            },
+        })
+    }
+
+    pub(crate) async fn tile(&self, map_x: i32, map_y: i32) -> Result<LuaTileSnapshot, String> {
+        let state = self.state.read().await;
+        tile_snapshot_at(&state, map_x, map_y)
     }
 
     async fn send_command(&self, command: SessionCommand) -> Result<(), String> {
@@ -659,6 +1015,7 @@ impl BotSession {
                     stop_background_worker(&mut spam_stop_tx);
                     stop_background_worker(&mut fishing_stop_tx);
                     runtime = None;
+                    self.state.write().await.current_outbound_tx = None;
                     self.set_error(reason).await;
                 }
             }
@@ -735,6 +1092,7 @@ impl BotSession {
             scheduler_loop(write_half, outbound_rx, stop_rx, logger, session_id).await;
         });
 
+        self.state.write().await.current_outbound_tx = Some(outbound_tx.clone());
         self.update_status(SessionStatus::MenuReady, None).await;
         Ok(ActiveRuntime {
             id: runtime_id,
@@ -1035,6 +1393,7 @@ impl BotSession {
             state.world_background_tiles.clear();
             state.world_water_tiles.clear();
             state.world_wiring_tiles.clear();
+            state.current_outbound_tx = None;
             state.growing_tiles.clear();
             state.collectables.clear();
             state.player_position = PlayerPosition {
@@ -1377,6 +1736,7 @@ struct SessionState {
     world_background_tiles: Vec<u16>,
     world_water_tiles: Vec<u16>,
     world_wiring_tiles: Vec<u16>,
+    current_outbound_tx: Option<mpsc::Sender<OutboundEnvelope>>,
     growing_tiles: HashMap<(i32, i32), GrowingTileState>,
     player_position: PlayerPosition,
     inventory: Vec<InventoryEntry>,
@@ -1488,6 +1848,14 @@ fn stop_background_worker(stop_tx: &mut Option<watch::Sender<bool>>) {
     }
 }
 
+fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(AtomicOrdering::Relaxed) {
+        Err("lua script stopped".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 fn apply_foreground_block_change(
     state: &mut SessionState,
     map_x: i32,
@@ -1578,6 +1946,47 @@ fn is_tile_ready_to_harvest_at(
     };
 
     Ok(now_ticks >= growth.growth_end_time)
+}
+
+fn tile_snapshot_at(
+    state: &SessionState,
+    map_x: i32,
+    map_y: i32,
+) -> Result<LuaTileSnapshot, String> {
+    let world = state
+        .world
+        .as_ref()
+        .ok_or_else(|| "no world loaded yet".to_string())?;
+    let index = tile_index(world, map_x, map_y)
+        .ok_or_else(|| format!("tile ({map_x}, {map_y}) is out of bounds"))?;
+    Ok(LuaTileSnapshot {
+        foreground: state
+            .world_foreground_tiles
+            .get(index)
+            .copied()
+            .unwrap_or_default(),
+        background: state
+            .world_background_tiles
+            .get(index)
+            .copied()
+            .unwrap_or_default(),
+        water: state
+            .world_water_tiles
+            .get(index)
+            .copied()
+            .unwrap_or_default(),
+        wiring: state
+            .world_wiring_tiles
+            .get(index)
+            .copied()
+            .unwrap_or_default(),
+        ready_to_harvest: is_tile_ready_to_harvest_at(
+            state,
+            map_x,
+            map_y,
+            protocol::csharp_ticks(),
+        )?,
+    })
 }
 
 fn summarize_tile_counts(tiles: &[u16]) -> Vec<TileCount> {
@@ -2764,6 +3173,18 @@ async fn walk_to_map(
     target_map_x: i32,
     target_map_y: i32,
 ) -> Result<(), String> {
+    let cancel = AtomicBool::new(false);
+    walk_to_map_cancellable(state, outbound_tx, target_map_x, target_map_y, &cancel).await
+}
+
+async fn walk_to_map_cancellable(
+    state: &Arc<RwLock<SessionState>>,
+    outbound_tx: &mpsc::Sender<OutboundEnvelope>,
+    target_map_x: i32,
+    target_map_y: i32,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    ensure_not_cancelled(cancel)?;
     let (start_x, start_y) = {
         let state = state.read().await;
         let x = state
@@ -2785,6 +3206,7 @@ async fn walk_to_map(
     });
 
     for window in steps.windows(2) {
+        ensure_not_cancelled(cancel)?;
         let [previous, current] = window else {
             continue;
         };
@@ -2807,6 +3229,7 @@ async fn walk_to_map(
         sleep(tutorial::walk_step_pause()).await;
     }
 
+    ensure_not_cancelled(cancel)?;
     send_docs(outbound_tx, vec![protocol::make_empty_movement()]).await?;
     Ok(())
 }
@@ -3207,6 +3630,7 @@ mod tests {
             world_background_tiles: background_tiles,
             world_water_tiles: Vec::new(),
             world_wiring_tiles: Vec::new(),
+            current_outbound_tx: None,
             growing_tiles: HashMap::new(),
             player_position: PlayerPosition {
                 map_x: None,
@@ -3411,6 +3835,16 @@ async fn collect_all_visible_collectables(
     state: &Arc<RwLock<SessionState>>,
     outbound_tx: &mpsc::Sender<OutboundEnvelope>,
 ) -> Result<(), String> {
+    let cancel = AtomicBool::new(false);
+    collect_all_visible_collectables_cancellable(state, outbound_tx, &cancel).await
+}
+
+async fn collect_all_visible_collectables_cancellable(
+    state: &Arc<RwLock<SessionState>>,
+    outbound_tx: &mpsc::Sender<OutboundEnvelope>,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    ensure_not_cancelled(cancel)?;
     let collectables = {
         let mut items = state
             .read()
@@ -3428,11 +3862,13 @@ async fn collect_all_visible_collectables(
     };
 
     for collectable in collectables {
-        walk_to_map(
+        ensure_not_cancelled(cancel)?;
+        walk_to_map_cancellable(
             state,
             outbound_tx,
             collectable.pos_x.round() as i32,
             collectable.pos_y.round() as i32,
+            cancel,
         )
         .await?;
         send_docs(

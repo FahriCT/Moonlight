@@ -1,6 +1,7 @@
 mod auth;
 mod constants;
 mod logging;
+mod lua_runtime;
 mod models;
 mod net;
 mod pathfinding;

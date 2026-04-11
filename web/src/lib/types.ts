@@ -80,6 +80,14 @@ export type ApiMessage = {
   message: string
 }
 
+export type LuaScriptStatusSnapshot = {
+  running: boolean
+  started_at: number | null
+  finished_at: number | null
+  last_error: string | null
+  last_result_message: string | null
+}
+
 export type LogEvent = {
   timestamp_ms: number
   level: string
