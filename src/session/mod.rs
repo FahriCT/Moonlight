@@ -1252,7 +1252,7 @@ impl BotSession {
                 self.remove_collectable(&message).await;
             }
             ids::PACKET_ID_FISHING_GAME_ACTION => {
-                self.apply_fishing_message(&message).await;
+                self.apply_fishing_message(&message, &runtime.outbound_tx).await;
             }
             ids::PACKET_ID_FISHING_RESULT => {
                 let result = message
@@ -1669,7 +1669,11 @@ impl BotSession {
             .remove(&collectable_id);
     }
 
-    async fn apply_fishing_message(&self, message: &Document) {
+    async fn apply_fishing_message(
+        &self,
+        message: &Document,
+        outbound_tx: &mpsc::Sender<OutboundEnvelope>,
+    ) {
         let minigame_type = message.get_i32("MGT").unwrap_or_default();
         if minigame_type != 2 {
             return;
@@ -1680,8 +1684,20 @@ impl BotSession {
             return;
         }
 
-        match message.get_i64("MGD").unwrap_or_default() {
-            2 => state.fishing.phase = FishingPhase::HookPrompted,
+        let mgd = message
+            .get_i64("MGD")
+            .ok()
+            .or_else(|| message.get_i32("MGD").ok().map(i64::from))
+            .unwrap_or_default();
+
+        match mgd {
+            2 => {
+                state.fishing.phase = FishingPhase::HookPrompted;
+                if !state.fishing.hook_sent {
+                    state.fishing.hook_sent = true;
+                    let _ = send_doc(outbound_tx, protocol::make_fishing_hook_action()).await;
+                }
+            }
             3 => {
                 state.fishing.phase = FishingPhase::GaugeActive;
                 state.fishing.fish_block = message.get_i32("BT").ok();
@@ -1751,6 +1767,7 @@ struct FishingAutomationState {
     fish_block: Option<i32>,
     rod_block: Option<i32>,
     gauge_entered_at: Option<Instant>,
+    hook_sent: bool,
     land_sent: bool,
     cleanup_pending: bool,
     sim_last_at: Option<Instant>,
@@ -1787,6 +1804,7 @@ impl Default for FishingAutomationState {
             fish_block: None,
             rod_block: None,
             gauge_entered_at: None,
+            hook_sent: false,
             land_sent: false,
             cleanup_pending: false,
             sim_last_at: None,
@@ -2152,39 +2170,26 @@ fn find_inventory_bait(
 
 fn find_fishing_map_point(
     world: Option<&WorldSnapshot>,
-    water_tiles: &[u16],
+    _water_tiles: &[u16],
     player_x: i32,
     player_y: i32,
     direction: &str,
 ) -> Result<(i32, i32), String> {
     let world = world.ok_or_else(|| "join a world before starting fishing".to_string())?;
-    if world.width == 0 || world.height == 0 || water_tiles.is_empty() {
-        return Err("world water tiles are not loaded yet".to_string());
+    if world.width == 0 || world.height == 0 {
+        return Err("world data is not loaded yet".to_string());
     }
 
     let width = world.width as i32;
     let height = world.height as i32;
-    let dx = if direction == "left" { -1 } else { 1 };
-
-    for y_offset in 0..=3 {
-        for candidate_y in [player_y + y_offset, player_y - y_offset] {
-            if candidate_y < 0 || candidate_y >= height {
-                continue;
-            }
-            let mut x = player_x + dx;
-            while x >= 0 && x < width {
-                let index = candidate_y as usize * world.width as usize + x as usize;
-                if water_tiles.get(index).copied().unwrap_or_default() != 0 {
-                    return Ok((x, candidate_y));
-                }
-                x += dx;
-            }
-        }
+    let target_x = player_x + if direction == "left" { -1 } else { 1 };
+    let target_y = player_y - 1;
+    if target_x < 0 || target_x >= width || target_y < 0 || target_y >= height {
+        return Err(format!(
+            "fishing target ({target_x}, {target_y}) is outside world bounds"
+        ));
     }
-
-    Err(format!(
-        "no water tile found to the {direction} of the player"
-    ))
+    Ok((target_x, target_y))
 }
 
 fn rod_family_name(rod_block: Option<i32>) -> &'static str {
@@ -2473,32 +2478,25 @@ async fn fishing_loop(
                 target.map_y,
                 target.bait_block_id,
             ),
+            protocol::make_start_fishing_game(
+                target.map_x,
+                target.map_y,
+                target.bait_block_id,
+            ),
         ],
     )
     .await?;
-    sleep(Duration::from_millis(350)).await;
-    send_docs(
-        outbound_tx,
-        vec![protocol::make_start_fishing_game(
-            target.map_x,
-            target.map_y,
-            target.bait_block_id,
-        )],
-    )
-    .await?;
 
-    let hook_deadline = Instant::now() + Duration::from_secs(8);
     loop {
         if *stop_rx.borrow() {
             return stop_fishing_game(state, outbound_tx).await;
         }
-        if Instant::now() > hook_deadline {
-            return stop_fishing_game(state, outbound_tx)
-                .await
-                .and_then(|_| Err("timed out waiting for fishing hook prompt".to_string()));
-        }
 
-        let phase = state.read().await.fishing.phase;
+        let fishing = state.read().await.fishing.clone();
+        let phase = fishing.phase;
+        if !fishing.active {
+            return Err("fishing was reset before hook prompt".to_string());
+        }
         if phase == FishingPhase::HookPrompted || phase == FishingPhase::GaugeActive {
             break;
         }
@@ -2512,9 +2510,15 @@ async fn fishing_loop(
         }
     }
 
-    send_docs(outbound_tx, vec![protocol::make_fishing_hook_action()]).await?;
+    let hook_sent = state.read().await.fishing.hook_sent;
+    if !hook_sent {
+        {
+            let mut session = state.write().await;
+            session.fishing.hook_sent = true;
+        }
+        send_docs(outbound_tx, vec![protocol::make_fishing_hook_action()]).await?;
+    }
 
-    let finish_deadline = Instant::now() + Duration::from_secs(12);
     let mut gauge_tick = interval(Duration::from_millis(50));
     gauge_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -2523,14 +2527,13 @@ async fn fishing_loop(
             return stop_fishing_game(state, outbound_tx).await;
         }
 
-        let phase = state.read().await.fishing.phase;
+        let fishing = state.read().await.fishing.clone();
+        let phase = fishing.phase;
         if phase == FishingPhase::Completed {
             return Ok(());
         }
-        if Instant::now() > finish_deadline {
-            return stop_fishing_game(state, outbound_tx)
-                .await
-                .and_then(|_| Err("timed out waiting for fishing reward".to_string()));
+        if !fishing.active {
+            return Err("fishing was reset before reward".to_string());
         }
 
         tokio::select! {
