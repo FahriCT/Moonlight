@@ -2494,6 +2494,9 @@ async fn fishing_loop(
 
         let fishing = state.read().await.fishing.clone();
         let phase = fishing.phase;
+        if phase == FishingPhase::CleanupPending || phase == FishingPhase::Completed {
+            return Ok(());
+        }
         if !fishing.active {
             return Err("fishing was reset before hook prompt".to_string());
         }
@@ -2529,6 +2532,9 @@ async fn fishing_loop(
 
         let fishing = state.read().await.fishing.clone();
         let phase = fishing.phase;
+        if phase == FishingPhase::CleanupPending {
+            continue;
+        }
         if phase == FishingPhase::Completed {
             return Ok(());
         }
