@@ -1,6 +1,6 @@
-pub const SERVER_HOST: &str = "63.176.210.142";
+pub const SERVER_HOST: &str = "game-lava.pixelworlds.pw";
 pub const SERVER_PORT: u16 = 10001;
-pub const RELAUNCH_PASS: &str = "#m(y+JxiHzFNXJnOo&UHpVwOyV1R%wP";
+pub const RELAUNCH_PASS: &str = "xSzwX4rU!js%-x@lrJxk";
 pub const PLAYFAB_TITLE_ID: &str = "11EF5C";
 pub const SOCIALFIRST_API_KEY: &str = "QwvzCrL2CexvXs2798fetBjty";
 pub const UNITY_VERSION: &str = "6000.3.11f1";

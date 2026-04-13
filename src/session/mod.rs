@@ -1099,18 +1099,6 @@ impl BotSession {
             .await?;
         self.apply_profile(&gpd).await;
 
-        for _ in 0..2 {
-            let _ = self
-                .send_and_receive(&mut stream, &[protocol::make_st()])
-                .await?;
-        }
-        let _ = self
-            .send_and_receive(&mut stream, &protocol::make_menu_transition())
-            .await?;
-        let _ = self
-            .send_and_receive(&mut stream, &protocol::make_glsi())
-            .await?;
-
         let runtime_id = RUNTIME_COUNTER.fetch_add(1, Ordering::Relaxed);
         let (read_half, write_half) = stream.into_split();
         let (outbound_tx, outbound_rx) = mpsc::channel(512);
@@ -1142,21 +1130,52 @@ impl BotSession {
         messages: &[Document],
         expected_id: &str,
     ) -> Result<Document, String> {
-        let response = self.send_and_receive(stream, messages).await?;
-        let extracted = protocol::extract_messages(&response);
-        if extracted.is_empty() {
-            return Err("empty response batch".to_string());
+        self.logger.transport(
+            TransportKind::Tcp,
+            Direction::Outgoing,
+            "tcp",
+            Some(&self.id),
+            protocol::summarize_messages(messages),
+        );
+        protocol::write_batch(stream, messages).await?;
+
+        let mut received_batches = Vec::new();
+        for _ in 0..16 {
+            let response = protocol::read_packet(stream).await?;
+            let extracted = protocol::extract_messages(&response);
+            self.logger.transport(
+                TransportKind::Tcp,
+                Direction::Incoming,
+                "tcp",
+                Some(&self.id),
+                protocol::summarize_messages(&extracted),
+            );
+
+            if extracted.is_empty() {
+                received_batches.push("empty response batch".to_string());
+                continue;
+            }
+
+            for message in &extracted {
+                if message.get_str("ID").unwrap_or_default() == ids::PACKET_ID_GPD {
+                    self.apply_profile(message).await;
+                }
+            }
+
+            if let Some(found) = extracted
+                .iter()
+                .find(|message| message.get_str("ID").unwrap_or_default() == expected_id)
+            {
+                return Ok(found.clone());
+            }
+
+            received_batches.push(protocol::summarize_messages(&extracted));
         }
 
-        if let Some(found) = extracted
-            .into_iter()
-            .find(|message| message.get_str("ID").unwrap_or_default() == expected_id)
-        {
-            return Ok(found);
-        }
-
-        let received = protocol::summarize_messages(&protocol::extract_messages(&response));
-        Err(format!("expected {expected_id}, got {received}"))
+        Err(format!(
+            "expected {expected_id}, got {}",
+            received_batches.join(" -> ")
+        ))
     }
 
     async fn send_and_receive(
