@@ -14,12 +14,13 @@ export function stripAnsi(value: string) {
   return value.replace(/\u001b\[[0-9;]*m/g, "")
 }
 
-export function buildWebSocketUrl() {
+export function buildWebSocketUrl(token: string | null) {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:"
+  const query = token ? `?token=${encodeURIComponent(token)}` : ""
   if (import.meta.env.DEV) {
-    return `${protocol}//${window.location.hostname}:3000/ws`
+    return `${protocol}//${window.location.hostname}:3000/ws${query}`
   }
-  return `${protocol}//${window.location.host}/ws`
+  return `${protocol}//${window.location.host}/ws${query}`
 }
 
 export function buildBackendUrl(path: string) {

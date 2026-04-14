@@ -1,5 +1,6 @@
 mod auth;
 mod constants;
+mod dashboard_auth;
 mod logging;
 mod lua_runtime;
 mod models;
@@ -10,7 +11,7 @@ mod session;
 mod web;
 mod world;
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use logging::{EventHub, Logger};
 use session::SessionManager;
@@ -20,7 +21,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_hub = Arc::new(EventHub::new(2048));
     let logger = Logger::new(event_hub.clone());
     let session_manager = SessionManager::new(logger.clone());
-    let app_state = web::AppState::new(session_manager, logger.clone(), event_hub);
+    let user_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("user.json");
+    let dashboard_auth = dashboard_auth::DashboardAuthManager::new(user_path)?;
+    let app_state = web::AppState::new(session_manager, logger.clone(), event_hub, dashboard_auth);
     let app = web::router(app_state.clone());
 
     let bind_addr = constants::network::dashboard_bind_addr();

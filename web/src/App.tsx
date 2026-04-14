@@ -45,12 +45,18 @@ import {
   automateTutorial,
   connectWithAuth,
   disconnectSession,
+  getDashboardAuthStatus,
   getMinimap,
+  getAuthToken,
   joinWorld,
   leaveWorld,
+  loginDashboard,
   listSessions,
   loadBlockTypes,
+  logoutDashboard,
   moveSession,
+  registerDashboardPassword,
+  setAuthToken,
   getLuaScriptStatus,
   startFishing,
   startLuaScript,
@@ -75,6 +81,7 @@ import type {
   AuthInput,
   AuthKind,
   BlockNameMap,
+  DashboardAuthStatus,
   LogEvent,
   LuaScriptStatusSnapshot,
   MinimapSnapshot,
@@ -243,6 +250,10 @@ function App() {
   const [jwt, setJwt] = useState("")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
+  const [dashboardPassword, setDashboardPassword] = useState("")
+  const [dashboardStatus, setDashboardStatus] = useState<DashboardAuthStatus | null>(null)
+  const [dashboardToken, setDashboardToken] = useState<string | null>(getAuthToken())
+  const [dashboardBusy, setDashboardBusy] = useState(false)
   const [sessions, setSessions] = useState<SessionSnapshot[]>([])
   const [sessionInputs, setSessionInputs] = useState<Record<string, SessionInputs>>({})
   const [minimaps, setMinimaps] = useState<Record<string, MinimapSnapshot | null>>({})
@@ -260,6 +271,24 @@ function App() {
   const reconnectTimerRef = useRef<number | null>(null)
   const logViewportRef = useRef<HTMLDivElement | null>(null)
   const shouldAutoScrollLogsRef = useRef(true)
+
+  const dashboardAuthenticated = dashboardStatus?.authenticated ?? false
+
+  const refreshDashboardStatus = useCallback(async () => {
+    try {
+      const status = await getDashboardAuthStatus()
+      setDashboardStatus(status)
+      if (!status.authenticated) {
+        setDashboardToken(null)
+        setAuthToken(null)
+      }
+    } catch (error) {
+      setFeedback({
+        kind: "error",
+        message: error instanceof Error ? error.message : "dashboard auth failed",
+      })
+    }
+  }, [])
 
   const upsertSession = useCallback((snapshot: SessionSnapshot) => {
     setSessions((current) => {
@@ -284,6 +313,13 @@ function App() {
   }, [upsertSession])
 
   useEffect(() => {
+    void refreshDashboardStatus()
+  }, [refreshDashboardStatus])
+
+  useEffect(() => {
+    if (!dashboardAuthenticated) {
+      return
+    }
     void Promise.all([listSessions(), loadBlockTypes()])
       .then(([sessionPayload, blockPayload]) => {
         setSessions(sortSessions(sessionPayload.sessions ?? []))
@@ -292,7 +328,7 @@ function App() {
       .catch((error: Error) => {
         setFeedback({ kind: "error", message: error.message })
       })
-  }, [])
+  }, [dashboardAuthenticated])
 
   useEffect(() => {
     setSessionInputs((current) => {
@@ -330,6 +366,9 @@ function App() {
   }, [sessions])
 
   useEffect(() => {
+    if (!dashboardAuthenticated) {
+      return
+    }
     let cancelled = false
     let socket: WebSocket | null = null
     let reconnectDelay = 1000
@@ -339,7 +378,7 @@ function App() {
         return
       }
 
-      socket = new WebSocket(buildWebSocketUrl())
+      socket = new WebSocket(buildWebSocketUrl(dashboardToken))
 
       socket.onopen = () => {
         reconnectDelay = 1000
@@ -383,7 +422,7 @@ function App() {
       }
       socket?.close()
     }
-  }, [upsertSession])
+  }, [dashboardAuthenticated, dashboardToken, upsertSession])
 
   const refreshMinimap = useCallback(async (sessionId: string) => {
     try {
@@ -441,13 +480,16 @@ function App() {
         const response = await action()
         updateFromAction(response)
       } catch (error) {
+        if (error instanceof Error && error.message.toLowerCase().includes("unauthorized")) {
+          await refreshDashboardStatus()
+        }
         setFeedback({
           kind: "error",
           message: error instanceof Error ? error.message : "request failed",
         })
       }
     },
-    [updateFromAction],
+    [refreshDashboardStatus, updateFromAction],
   )
 
   const runLuaAction = useCallback(
@@ -466,13 +508,16 @@ function App() {
         }))
         await refreshLuaStatus(sessionId)
       } catch (error) {
+        if (error instanceof Error && error.message.toLowerCase().includes("unauthorized")) {
+          await refreshDashboardStatus()
+        }
         setFeedback({
           kind: "error",
           message: error instanceof Error ? error.message : "request failed",
         })
       }
     },
-    [refreshLuaStatus],
+    [refreshDashboardStatus, refreshLuaStatus],
   )
 
   useEffect(() => {
@@ -518,6 +563,124 @@ function App() {
     } finally {
       setConnecting(false)
     }
+  }
+
+  const handleDashboardRegister = async () => {
+    setDashboardBusy(true)
+    try {
+      const response = await registerDashboardPassword(dashboardPassword)
+      if (response.token) {
+        setAuthToken(response.token)
+        setDashboardToken(response.token)
+      }
+      await refreshDashboardStatus()
+      setDashboardPassword("")
+      if (response.message) {
+        setFeedback({ kind: "success", message: response.message })
+      }
+    } catch (error) {
+      setFeedback({
+        kind: "error",
+        message: error instanceof Error ? error.message : "register failed",
+      })
+    } finally {
+      setDashboardBusy(false)
+    }
+  }
+
+  const handleDashboardLogin = async () => {
+    setDashboardBusy(true)
+    try {
+      const response = await loginDashboard(dashboardPassword)
+      if (response.token) {
+        setAuthToken(response.token)
+        setDashboardToken(response.token)
+      }
+      await refreshDashboardStatus()
+      setDashboardPassword("")
+      if (response.message) {
+        setFeedback({ kind: "success", message: response.message })
+      }
+    } catch (error) {
+      setFeedback({
+        kind: "error",
+        message: error instanceof Error ? error.message : "login failed",
+      })
+    } finally {
+      setDashboardBusy(false)
+    }
+  }
+
+  const handleDashboardLogout = async () => {
+    setDashboardBusy(true)
+    try {
+      await logoutDashboard()
+    } catch {
+      // ignore
+    } finally {
+      setAuthToken(null)
+      setDashboardToken(null)
+      await refreshDashboardStatus()
+      setDashboardBusy(false)
+    }
+  }
+
+  if (!dashboardStatus || !dashboardAuthenticated) {
+    const registered = dashboardStatus?.registered ?? false
+    return (
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top,#14212f_0%,#0d141c_45%,#081018_100%)] text-foreground">
+        <div className="mx-auto flex min-h-screen max-w-[640px] items-center px-4 py-10">
+          <Card className="w-full border-white/10 bg-card/90 ring-white/10">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Moon className="size-4" />
+                Moonlight Dashboard Locked
+              </CardTitle>
+              <CardDescription>
+                {registered
+                  ? "Enter your password to unlock the dashboard."
+                  : "Create a password to protect the dashboard."}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4">
+              <div className="grid gap-2">
+                <label className="text-xs text-muted-foreground">Password</label>
+                <Input
+                  type="password"
+                  value={dashboardPassword}
+                  onChange={(event) => setDashboardPassword(event.target.value)}
+                  placeholder={registered ? "Your password" : "Create a strong password"}
+                  className="rounded-xl border-white/10 bg-white/5"
+                />
+              </div>
+              <Button
+                onClick={() => void (registered ? handleDashboardLogin() : handleDashboardRegister())}
+                disabled={dashboardBusy}
+                className="rounded-xl"
+              >
+                {dashboardBusy ? (
+                  <SpinnerGap className="size-4 animate-spin" />
+                ) : (
+                  <Plug className="size-4" />
+                )}
+                {registered ? "Unlock Dashboard" : "Create Password"}
+              </Button>
+              {feedback ? (
+                <div
+                  className={`rounded-xl border px-3 py-2 text-xs ${
+                    feedback.kind === "error"
+                      ? "border-red-500/30 bg-red-500/10 text-red-100"
+                      : "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
+                  }`}
+                >
+                  {feedback.message}
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    )
   }
 
   const mutateSessionInput = (
@@ -642,6 +805,15 @@ function App() {
             >
               {connecting ? <SpinnerGap className="size-4 animate-spin" /> : <Plug className="size-4" />}
               Connect
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void handleDashboardLogout()}
+              disabled={dashboardBusy}
+              className="rounded-xl border-white/10 bg-white/5"
+            >
+              {dashboardBusy ? <SpinnerGap className="size-4 animate-spin" /> : <Plug className="size-4" />}
+              Lock Dashboard
             </Button>
 
             {feedback ? (

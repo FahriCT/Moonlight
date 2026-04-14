@@ -3,6 +3,8 @@ import type {
   ApiMessage,
   AuthInput,
   BlockNameMap,
+  DashboardAuthResponse,
+  DashboardAuthStatus,
   LuaScriptStatusSnapshot,
   MinimapSnapshot,
   SessionSnapshot,
@@ -27,11 +29,37 @@ type LuaStatusResponse = {
   status?: LuaScriptStatusSnapshot | null
 }
 
+const AUTH_TOKEN_KEY = "moonlight_dashboard_token"
+
+export function getAuthToken() {
+  if (typeof window === "undefined") {
+    return null
+  }
+  return window.localStorage.getItem(AUTH_TOKEN_KEY)
+}
+
+export function setAuthToken(token: string | null) {
+  if (typeof window === "undefined") {
+    return
+  }
+  if (token) {
+    window.localStorage.setItem(AUTH_TOKEN_KEY, token)
+  } else {
+    window.localStorage.removeItem(AUTH_TOKEN_KEY)
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const authToken = getAuthToken()
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(init?.headers ? (init.headers as Record<string, string>) : {}),
+  }
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`
+  }
   const response = await fetch(buildBackendUrl(path), {
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers,
     ...init,
   })
 
@@ -46,6 +74,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(message ?? `request failed: ${response.status}`)
   }
   return payload
+}
+
+export function getDashboardAuthStatus() {
+  return request<DashboardAuthStatus>("/api/auth/status")
+}
+
+export function registerDashboardPassword(password: string) {
+  return request<DashboardAuthResponse>("/api/auth/register", {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  })
+}
+
+export function loginDashboard(password: string) {
+  return request<DashboardAuthResponse>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  })
+}
+
+export function logoutDashboard() {
+  return request<DashboardAuthResponse>("/api/auth/logout", {
+    method: "POST",
+  })
 }
 
 export function connectWithAuth(auth: AuthInput) {

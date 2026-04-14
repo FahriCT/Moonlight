@@ -6,7 +6,7 @@ use axum::{
         Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{Method, Request, StatusCode},
+    http::{HeaderMap, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -19,6 +19,7 @@ use tower_http::{
 };
 
 use crate::{
+    dashboard_auth::DashboardAuthManager,
     logging::{Direction, EventHub, Logger, TransportKind},
     models::{
         ApiMessage, CreateSessionRequest, FishingStartRequest, JoinWorldRequest,
@@ -33,14 +34,21 @@ pub struct AppState {
     pub session_manager: SessionManager,
     pub logger: Logger,
     pub event_hub: Arc<EventHub>,
+    pub dashboard_auth: DashboardAuthManager,
 }
 
 impl AppState {
-    pub fn new(session_manager: SessionManager, logger: Logger, event_hub: Arc<EventHub>) -> Self {
+    pub fn new(
+        session_manager: SessionManager,
+        logger: Logger,
+        event_hub: Arc<EventHub>,
+        dashboard_auth: DashboardAuthManager,
+    ) -> Self {
         Self {
             session_manager,
             logger,
             event_hub,
+            dashboard_auth,
         }
     }
 }
@@ -52,6 +60,10 @@ pub fn router(state: AppState) -> Router {
     let block_types_file = project_root.join("block_types.json");
 
     Router::new()
+        .route("/api/auth/status", get(auth_status))
+        .route("/api/auth/register", post(auth_register))
+        .route("/api/auth/login", post(auth_login))
+        .route("/api/auth/logout", post(auth_logout))
         .route("/api/connect", post(connect_with_auth))
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
@@ -87,6 +99,10 @@ pub fn router(state: AppState) -> Router {
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
+            auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
             http_log_middleware,
         ))
         .with_state(state)
@@ -116,6 +132,140 @@ async fn http_log_middleware(
         format!("{method} {path} -> {}", response.status()),
     );
     response
+}
+
+async fn auth_middleware(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if request.method() == Method::OPTIONS {
+        return next.run(request).await;
+    }
+    let is_auth_path = path.starts_with("/api/auth/");
+    let is_api_path = path.starts_with("/api/");
+    let is_ws_path = path == "/ws";
+
+    if !is_api_path && !is_ws_path {
+        return next.run(request).await;
+    }
+
+    if is_auth_path {
+        return next.run(request).await;
+    }
+
+    let token = if is_ws_path {
+        token_from_query(request.uri().query())
+    } else {
+        token_from_headers(request.headers())
+    };
+
+    if state.dashboard_auth.is_authorized(token.as_deref()).await {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "ok": false,
+                "message": "unauthorized"
+            })),
+        )
+            .into_response()
+    }
+}
+
+fn token_from_headers(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get("authorization")?.to_str().ok()?;
+    let value = value.trim();
+    if let Some(raw) = value.strip_prefix("Bearer ") {
+        let token = raw.trim();
+        if token.is_empty() {
+            None
+        } else {
+            Some(token.to_string())
+        }
+    } else {
+        None
+    }
+}
+
+fn token_from_query(query: Option<&str>) -> Option<String> {
+    let query = query?;
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next()?;
+        if key == "token" {
+            let value = parts.next().unwrap_or_default();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+async fn auth_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let token = token_from_headers(&headers);
+    let status = state.dashboard_auth.status(token.as_deref()).await;
+    Json(json!({
+        "registered": status.registered,
+        "authenticated": status.authenticated,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct PasswordRequest {
+    password: String,
+}
+
+async fn auth_register(
+    State(state): State<AppState>,
+    Json(request): Json<PasswordRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = state
+        .dashboard_auth
+        .register(request.password)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "ok": true,
+        "message": "dashboard password created",
+        "token": token,
+    })))
+}
+
+async fn auth_login(
+    State(state): State<AppState>,
+    Json(request): Json<PasswordRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = state
+        .dashboard_auth
+        .login(request.password)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "ok": true,
+        "message": "dashboard unlocked",
+        "token": token,
+    })))
+}
+
+async fn auth_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if let Some(token) = token_from_headers(&headers) {
+        state.dashboard_auth.logout(&token).await;
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "message": "logged out",
+    })))
 }
 
 async fn connect_with_auth(

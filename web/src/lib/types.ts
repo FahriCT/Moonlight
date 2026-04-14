@@ -126,3 +126,14 @@ export type ServerEvent =
     }
 
 export type BlockNameMap = Record<string, string>
+
+export type DashboardAuthStatus = {
+  registered: boolean
+  authenticated: boolean
+}
+
+export type DashboardAuthResponse = {
+  ok?: boolean
+  message?: string
+  token?: string
+}
