@@ -130,6 +130,12 @@ export function disconnectSession(sessionId: string) {
   })
 }
 
+export function reconnectSession(sessionId: string) {
+  return request<ActionResponse>(`/api/sessions/${sessionId}/reconnect`, {
+    method: "POST",
+  })
+}
+
 export function automateTutorial(sessionId: string) {
   return request<ActionResponse>(`/api/sessions/${sessionId}/tutorial/automate`, {
     method: "POST",

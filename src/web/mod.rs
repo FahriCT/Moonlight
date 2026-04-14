@@ -71,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/join", post(join_world))
         .route("/api/sessions/{id}/leave", post(leave_world))
         .route("/api/sessions/{id}/disconnect", post(disconnect_session))
+        .route("/api/sessions/{id}/reconnect", post(reconnect_session))
         .route("/api/sessions/{id}/move", post(move_session))
         .route("/api/sessions/{id}/punch", post(punch_session))
         .route("/api/sessions/{id}/place", post(place_session))
@@ -360,6 +361,22 @@ async fn disconnect_session(
     session.disconnect().await.map_err(ApiError::bad_request)?;
     Ok(Json(json!({
         "result": ApiMessage { ok: true, message: "disconnect queued".to_string() },
+        "session": session.snapshot().await
+    })))
+}
+
+async fn reconnect_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session = state
+        .session_manager
+        .get_session(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found("session not found"))?;
+    session.reconnect().await.map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "result": ApiMessage { ok: true, message: "reconnect queued".to_string() },
         "session": session.snapshot().await
     })))
 }

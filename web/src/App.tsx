@@ -58,6 +58,7 @@ import {
   registerDashboardPassword,
   setAuthToken,
   getLuaScriptStatus,
+  reconnectSession,
   startFishing,
   startLuaScript,
   startSpam,
@@ -1050,7 +1051,7 @@ function App() {
                                 Join
                               </Button>
                             </div>
-                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
                               <Button
                                 variant="outline"
                                 className="rounded-xl border-white/10 bg-white/5"
@@ -1066,6 +1067,15 @@ function App() {
                                 }
                               >
                                 Disconnect
+                              </Button>
+                              <Button
+                                variant="outline"
+                                className="rounded-xl border-white/10 bg-white/5"
+                                onClick={() =>
+                                  void runAction(() => reconnectSession(session.id))
+                                }
+                              >
+                                Reconnect
                               </Button>
                               <Button
                                 variant="outline"

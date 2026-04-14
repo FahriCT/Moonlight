@@ -182,6 +182,9 @@ export function MinimapPanel({ minimap, playerPosition, onHoverChange }: Props) 
     if (!minimap || !containerRef.current) {
       return
     }
+    if (pointerOrigin.current) {
+      event.preventDefault()
+    }
     const rect = containerRef.current.getBoundingClientRect()
     const tile = tileAtCanvasPoint(
       {
@@ -246,12 +249,14 @@ export function MinimapPanel({ minimap, playerPosition, onHoverChange }: Props) 
       ref={containerRef}
       className="relative h-80 overflow-hidden rounded-2xl border border-white/10 bg-[#081018]"
       onPointerDown={(event) => {
+        event.preventDefault()
         pointerOrigin.current = {
           x: event.clientX,
           y: event.clientY,
           offsetX: view.offsetX,
           offsetY: view.offsetY,
         }
+        event.currentTarget.setPointerCapture(event.pointerId)
       }}
       onPointerUp={() => {
         pointerOrigin.current = null
@@ -260,7 +265,11 @@ export function MinimapPanel({ minimap, playerPosition, onHoverChange }: Props) 
         pointerOrigin.current = null
         updateHover(null)
       }}
+      onPointerCancel={() => {
+        pointerOrigin.current = null
+      }}
       onPointerMove={handlePointerMove}
+      style={{ touchAction: "none" }}
     >
       {minimap && size.width > 0 && size.height > 0 ? (
         <Application

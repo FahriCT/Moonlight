@@ -230,6 +230,11 @@ impl BotSession {
         self.send_command(SessionCommand::Disconnect).await
     }
 
+    pub async fn reconnect(&self) -> Result<(), String> {
+        self.send_command(SessionCommand::Disconnect).await?;
+        self.send_command(SessionCommand::Connect).await
+    }
+
     pub async fn minimap_snapshot(&self) -> Result<MinimapSnapshot, String> {
         let state = self.state.read().await;
         let world = state
