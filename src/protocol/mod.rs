@@ -91,70 +91,60 @@ pub fn summarize_messages(messages: &[Document]) -> String {
     if messages.is_empty() {
         return "empty".to_string();
     }
-
     messages
         .iter()
-        .map(summarize_message)
+        .map(log_message)
         .collect::<Vec<_>>()
         .join(" | ")
 }
 
 pub fn summarize_message(message: &Document) -> String {
-    let id = message.get_str("ID").unwrap_or("?");
-    let summary = match id {
-        "TTjW" => format!("TTjW W={}", message.get_str("W").unwrap_or("?")),
-        "Gw" => format!("Gw W={}", message.get_str("W").unwrap_or("?")),
-        "ULS" => format!("ULS LS={}", message.get_str("LS").unwrap_or("?")),
-        "GWC" => {
-            let bytes = binary_bytes(message.get("W")).unwrap_or_default();
-            format!("GWC compressed={}B", bytes.len())
-        }
-        "OoIP" => format!(
-            "OoIP IP={} WN={}",
-            message.get_str("IP").unwrap_or("?"),
-            message.get_str("WN").unwrap_or("?")
-        ),
-        "GPd" => format!(
-            "GPd U={} UN={}",
-            message.get_str("U").unwrap_or("?"),
-            message.get_str("UN").unwrap_or("?")
-        ),
-        _ => id.to_string(),
-    };
-
-    format!("{summary} {}", compact_document(message))
+    log_message(message)
 }
 
-fn compact_document(document: &Document) -> String {
-    let items = document
+pub fn log_message(message: &Document) -> String {
+    serde_json::to_string(&doc_to_json(message)).unwrap_or_else(|_| format!("{message:?}"))
+}
+
+pub fn log_batch(messages: &[Document]) -> String {
+    let wrapped = wrap_batch(messages);
+    serde_json::to_string(&doc_to_json(&wrapped)).unwrap_or_else(|_| format!("{wrapped:?}"))
+}
+
+pub fn log_packet(packet: &Document) -> String {
+    serde_json::to_string(&doc_to_json(packet)).unwrap_or_else(|_| format!("{packet:?}"))
+}
+
+fn doc_to_json(doc: &Document) -> serde_json::Value {
+    let map = doc
         .iter()
-        .map(|(key, value)| format!("{key}={}", compact_bson(value)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("{{{items}}}")
+        .map(|(k, v)| (k.clone(), bson_to_json(v)))
+        .collect();
+    serde_json::Value::Object(map)
 }
 
-fn compact_bson(value: &Bson) -> String {
+fn bson_to_json(value: &Bson) -> serde_json::Value {
     match value {
-        Bson::String(value) => format!("{value:?}"),
-        Bson::Int32(value) => value.to_string(),
-        Bson::Int64(value) => value.to_string(),
-        Bson::Double(value) => format!("{value}"),
-        Bson::Boolean(value) => value.to_string(),
-        Bson::Null => "null".to_string(),
-        Bson::Binary(binary) => format!("<binary:{}B>", binary.bytes.len()),
-        Bson::Document(document) => compact_document(document),
-        Bson::Array(items) => {
-            let rendered = items
-                .iter()
-                .map(compact_bson)
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("[{rendered}]")
+        Bson::Double(v) => serde_json::json!(v),
+        Bson::String(v) => serde_json::json!(v),
+        Bson::Document(d) => doc_to_json(d),
+        Bson::Array(arr) => serde_json::Value::Array(arr.iter().map(bson_to_json).collect()),
+        Bson::Boolean(v) => serde_json::json!(v),
+        Bson::Null => serde_json::Value::Null,
+        Bson::Int32(v) => serde_json::json!(v),
+        Bson::Int64(v) => serde_json::json!(v),
+        Bson::Binary(b) => {
+            let encoded = b.bytes.iter().fold(String::new(), |mut s, byte| {
+                use std::fmt::Write;
+                let _ = write!(s, "{byte:02x}");
+                s
+            });
+            serde_json::json!(format!("<bin:{encoded}>"))
         }
-        other => format!("{other:?}"),
+        other => serde_json::json!(format!("{other:?}")),
     }
 }
+
 
 pub fn make_vchk(device_id: &str) -> Document {
     doc! {

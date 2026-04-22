@@ -2799,14 +2799,15 @@ async fn read_loop(
     loop {
         match protocol::read_packet(&mut reader).await {
             Ok(packet) => {
-                for message in protocol::extract_messages(&packet) {
-                    logger.transport(
-                        TransportKind::Tcp,
-                        Direction::Incoming,
-                        "tcp",
-                        Some(&session_id),
-                        protocol::summarize_message(&message),
-                    );
+                logger.transport(
+                    TransportKind::Tcp,
+                    Direction::Incoming,
+                    "tcp",
+                    Some(&session_id),
+                    protocol::log_packet(&packet),
+                );
+                let messages = protocol::extract_messages(&packet);
+                for message in messages {
                     if controller_tx
                         .send(ControllerEvent::Inbound(runtime_id, message))
                         .await
@@ -2840,9 +2841,11 @@ async fn scheduler_loop(
     let mut movement_tick = interval(timing::movement_tick_interval());
     let mut keepalive_tick = interval(timing::keepalive_interval());
     let mut flush_tick = interval(timing::flush_interval());
+    let mut ping_tick = interval(timing::ping_interval());
     movement_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     keepalive_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     flush_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ping_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     // Fire the first ST immediately to begin the initial calibration burst.
     let mut st_deadline = tokio::time::Instant::now();
@@ -2888,6 +2891,22 @@ async fn scheduler_loop(
                 }
             }
 
+            _ = ping_tick.tick() => {
+                if !movement.in_world {
+                    logger.transport(
+                        TransportKind::Tcp,
+                        Direction::Outgoing,
+                        "tcp",
+                        Some(&session_id),
+                        protocol::log_batch(&outbox),
+                    );
+                    if protocol::write_batch(&mut writer, &outbox).await.is_err() {
+                        return;
+                    }
+                    outbox.clear();
+                }
+            }
+
             _ = flush_tick.tick() => {
                 if !outbox.is_empty() {
                     logger.transport(
@@ -2895,7 +2914,7 @@ async fn scheduler_loop(
                         Direction::Outgoing,
                         "tcp",
                         Some(&session_id),
-                        protocol::summarize_messages(&outbox),
+                        protocol::log_batch(&outbox),
                     );
                     if protocol::write_batch(&mut writer, &outbox).await.is_err() {
                         return;

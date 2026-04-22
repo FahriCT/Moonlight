@@ -35,11 +35,17 @@ fn main() -> Result<(), String> {
 
         let outer = Document::from_reader(Cursor::new(payload))
             .map_err(|error| format!("record {record_index}: {error}"))?;
-        for (message_index, message) in extract_messages(&outer).iter().enumerate() {
-            println!(
-                "#{record_index}.{message_index} {direction} ts={timestamp} {}",
-                summarize_message(message)
-            );
+        let messages = extract_messages(&outer);
+        let mc = outer.get_i32("mc").unwrap_or(-1);
+        if messages.is_empty() {
+            println!("#{record_index} {direction} ts={timestamp} [empty batch mc={mc}]");
+        } else {
+            for (message_index, message) in messages.iter().enumerate() {
+                println!(
+                    "#{record_index}.{message_index} {direction} ts={timestamp} mc={mc} {}",
+                    summarize_message(message)
+                );
+            }
         }
 
         record_index += 1;

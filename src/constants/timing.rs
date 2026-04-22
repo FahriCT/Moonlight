@@ -3,6 +3,7 @@ use std::time::Duration;
 pub const MOVEMENT_TICK_MS: u64 = 17;
 pub const KEEPALIVE_INTERVAL_MS: u64 = 5_000;
 pub const FLUSH_INTERVAL_MS: u64 = 50;
+pub const PING_INTERVAL_MS: u64 = 250;
 pub const HTTP_TIMEOUT_SECS: u64 = 15;
 
 // Adaptive time-sync constants (mirrors KukouriTime SetTimeOffset algorithm)
@@ -23,6 +24,10 @@ pub fn keepalive_interval() -> Duration {
 
 pub fn flush_interval() -> Duration {
     Duration::from_millis(FLUSH_INTERVAL_MS)
+}
+
+pub fn ping_interval() -> Duration {
+    Duration::from_millis(PING_INTERVAL_MS)
 }
 
 pub fn http_timeout() -> Duration {
