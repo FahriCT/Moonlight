@@ -172,6 +172,7 @@ impl BotSession {
                 world_x: None,
                 world_y: None,
             },
+            current_direction: movement::DIR_RIGHT,
             other_players: HashMap::new(),
             inventory: Vec::new(),
             collectables: HashMap::new(),
@@ -294,21 +295,14 @@ impl BotSession {
         if amount <= 0 {
             return Err("amount must be greater than 0".to_string());
         }
-        if let Some(type_name) = block_type_name_for(block_id as u16) {
-            if type_name == "WearableItem" {
-                let name = block_name_for(block_id as u16)
-                    .unwrap_or_else(|| format!("block {block_id}"));
-                return Err(format!(
-                    "{name} is a {type_name}; server rejects dropping this category"
-                ));
-            }
-        }
         self.send_command(SessionCommand::DropItem {
             block_id,
             amount,
         })
         .await?;
-        Ok(format!("drop queued: {amount}x block {block_id}"))
+        let item_name = block_name_for(block_id as u16)
+            .unwrap_or_else(|| format!("item {block_id}"));
+        Ok(format!("drop queued: {amount}x {item_name}"))
     }
 
     pub async fn queue_wear_item(&self, block_id: i32, equip: bool) -> Result<String, String> {
@@ -1119,9 +1113,8 @@ impl BotSession {
                             continue;
                         };
                         let outbound_tx = active.outbound_tx.clone();
-                        let (tile_x, tile_y, inventory_type) = {
+                        let drop_request = {
                             let state = self.state.read().await;
-                            let pos = &state.player_position;
                             let inventory_type = block_inventory_type_for(block_id as u16)
                                 .map(i32::from)
                                 .or_else(|| {
@@ -1134,15 +1127,14 @@ impl BotSession {
                                         .map(|entry| entry.inventory_type as i32)
                                 })
                                 .unwrap_or_default();
-                            if let (Some(world_x), Some(world_y)) = (pos.world_x, pos.world_y) {
-                                let (map_x, map_y) = protocol::world_to_map(world_x, world_y);
-                                (map_x.floor() as i32, map_y.floor() as i32 + 1, inventory_type)
-                            } else {
-                                (
-                                    pos.map_x.unwrap_or(0.0).floor() as i32,
-                                    pos.map_y.unwrap_or(0.0).floor() as i32 + 1,
-                                    inventory_type,
-                                )
+                            drop_target_tile(&state)
+                                .map(|(drop_x, drop_y)| (drop_x, drop_y, inventory_type))
+                        };
+                        let (tile_x, tile_y, inventory_type) = match drop_request {
+                            Ok(request) => request,
+                            Err(error) => {
+                                self.set_error(error).await;
+                                continue;
                             }
                         };
                         let _ = send_docs_immediate(
@@ -1658,6 +1650,9 @@ impl BotSession {
             let mut state = self.state.write().await;
             if local_uid.as_deref() == Some(uid) {
                 let changed = update_player_position_from_message(message, &mut state.player_position);
+                if let Ok(direction) = message.get_i32("d") {
+                    state.current_direction = direction;
+                }
                 drop(state);
                 if changed {
                     self.publish_snapshot().await;
@@ -2388,6 +2383,7 @@ struct SessionState {
     other_players: HashMap<String, PlayerPosition>,
     inventory: Vec<InventoryEntry>,
     collectables: HashMap<i32, CollectableState>,
+    current_direction: i32,
     last_error: Option<String>,
     awaiting_ready: bool,
     tutorial_spawn_pod_confirmed: bool,
@@ -3573,7 +3569,7 @@ async fn walk_to_map_cancellable(
     });
     let mut last_direction = {
         let state = state.read().await;
-        current_facing_direction(&state.player_position)
+        current_facing_direction(&state)
     };
 
     for window in steps.windows(2) {
@@ -3890,8 +3886,8 @@ async fn next_manual_step(
     let (dx, dy, facing_direction) = match direction {
         "left" => (-1, 0, movement::DIR_LEFT),
         "right" => (1, 0, movement::DIR_RIGHT),
-        "up" => (0, 1, current_facing_direction(&state.player_position)),
-        "down" => (0, -1, current_facing_direction(&state.player_position)),
+        "up" => (0, 1, current_facing_direction(&state)),
+        "down" => (0, -1, current_facing_direction(&state)),
         _ => return Err(format!("unsupported movement direction: {direction}")),
     };
 
@@ -3919,7 +3915,7 @@ async fn punch_target_from_offset(
     } else if offset_x > 0 {
         movement::DIR_RIGHT
     } else {
-        current_facing_direction(&state.player_position)
+        current_facing_direction(&state)
     };
 
     Ok((
@@ -3929,11 +3925,30 @@ async fn punch_target_from_offset(
     ))
 }
 
-fn current_facing_direction(position: &PlayerPosition) -> i32 {
-    match (position.map_x, position.world_x) {
-        (Some(_), Some(_)) => movement::DIR_RIGHT,
+fn current_facing_direction(state: &SessionState) -> i32 {
+    match state.current_direction {
+        movement::DIR_LEFT => movement::DIR_LEFT,
         _ => movement::DIR_RIGHT,
     }
+}
+
+fn drop_target_tile(state: &SessionState) -> Result<(i32, i32), String> {
+    let current_map_x = state
+        .player_position
+        .map_x
+        .ok_or_else(|| "player map x is not known yet".to_string())?
+        .round() as i32;
+    let current_map_y = state
+        .player_position
+        .map_y
+        .ok_or_else(|| "player map y is not known yet".to_string())?
+        .round() as i32;
+    let dx = if current_facing_direction(state) == movement::DIR_LEFT {
+        -1
+    } else {
+        1
+    };
+    Ok((current_map_x + dx, current_map_y))
 }
 
 async fn planned_path(
@@ -4008,6 +4023,7 @@ async fn move_to_map(
         state.player_position.map_y = Some(map_y as f64);
         state.player_position.world_x = Some(world_x);
         state.player_position.world_y = Some(world_y);
+        state.current_direction = direction;
         (world_x, world_y)
     };
     // Declare the step to the server (once per step).
@@ -4084,7 +4100,7 @@ mod tests {
 
     use super::{
         BotSession, FishingAutomationState, GrowingTileState, QueuePriority, SchedulerPhase,
-        SchedulerState, SendMode, SessionState,
+        SchedulerState, SendMode, SessionState, drop_target_tile,
         apply_destroy_block_change, apply_foreground_block_change, is_tile_ready_to_harvest_at,
         update_player_position_from_message,
     };
@@ -4136,6 +4152,7 @@ mod tests {
                 world_x: None,
                 world_y: None,
             },
+            current_direction: movement::DIR_RIGHT,
             other_players: HashMap::new(),
             inventory: Vec::new(),
             collectables: HashMap::new(),
@@ -4467,6 +4484,18 @@ mod tests {
         assert!(next.is_some());
         assert_eq!(scheduler.phase, SchedulerPhase::MenuIdle);
         assert!(!scheduler.st_due);
+    }
+
+    #[test]
+    fn drop_target_uses_facing_direction_instead_of_y_plus_one() {
+        let mut state = test_state(10, 10, vec![0; 100], vec![0; 100]);
+        state.player_position.map_x = Some(40.0);
+        state.player_position.map_y = Some(30.0);
+        state.current_direction = movement::DIR_RIGHT;
+
+        let target = drop_target_tile(&state).unwrap();
+
+        assert_eq!(target, (41, 30));
     }
 }
 
