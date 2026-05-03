@@ -90,6 +90,7 @@ function MinimapPanelImpl({ minimap, playerPosition, currentWorld, onHoverChange
     if (cached) {
       atlasImgRef.current = cached.image
       atlasMetaRef.current = cached.meta
+      setAtlasResolved(true)
       return
     }
     let cancelled = false
@@ -105,6 +106,9 @@ function MinimapPanelImpl({ minimap, playerPosition, currentWorld, onHoverChange
       cancelled = true
     }
   }, [])
+
+  const minimapRef = useRef<MinimapSnapshot | null>(minimap)
+  minimapRef.current = minimap
 
   const lastWorldRef = useRef<string | null>(null)
   useEffect(() => {
@@ -168,12 +172,17 @@ function MinimapPanelImpl({ minimap, playerPosition, currentWorld, onHoverChange
       const cell = meta.cell
       const fg = minimap.foreground_tiles
       const bg = minimap.background_tiles
+      const xMin = Math.max(0, Math.floor(-dx / scale))
+      const xMax = Math.min(minimap.width, Math.ceil((cw - dx) / scale))
+      const yScreenMin = Math.max(0, Math.floor(-dy / scale))
+      const yScreenMax = Math.min(minimap.height, Math.ceil((ch - dy) / scale))
+      const yMin = minimap.height - yScreenMax
+      const yMax = minimap.height - yScreenMin
 
       ctx.globalAlpha = 0.5
-      for (let y = 0; y < minimap.height; y += 1) {
-        for (let x = 0; x < minimap.width; x += 1) {
-          const idx = y * minimap.width + x
-          const bgId = bg[idx]
+      for (let y = yMin; y < yMax; y += 1) {
+        for (let x = xMin; x < xMax; x += 1) {
+          const bgId = bg[y * minimap.width + x]
           if (!bgId) continue
           const pos = meta.tiles[String(bgId)]
           if (!pos) continue
@@ -193,8 +202,8 @@ function MinimapPanelImpl({ minimap, playerPosition, currentWorld, onHoverChange
       }
       ctx.globalAlpha = 1.0
 
-      for (let y = 0; y < minimap.height; y += 1) {
-        for (let x = 0; x < minimap.width; x += 1) {
+      for (let y = yMin; y < yMax; y += 1) {
+        for (let x = xMin; x < xMax; x += 1) {
           const fgId = fg[y * minimap.width + x]
           if (!fgId) continue
           const pos = meta.tiles[String(fgId)]
@@ -297,21 +306,19 @@ function MinimapPanelImpl({ minimap, playerPosition, currentWorld, onHoverChange
     moved: boolean
   } | null>(null)
 
+  const lastHoverKeyRef = useRef<string>("")
   const updateHover = useCallback((tile: TileInfo | null) => {
-    setHover((current) => {
-      const sameKey =
-        (current?.mapX ?? null) === (tile?.mapX ?? null) &&
-        (current?.mapY ?? null) === (tile?.mapY ?? null)
-      if (sameKey) return current
-      if (!tile) {
-        onHoverChangeRef.current("Hover a tile to inspect it.")
-        return null
-      }
-      onHoverChangeRef.current(
-        `hover tile=(${tile.mapX}, ${tile.mapY}) fg=${tile.fg} bg=${tile.bg} water=${tile.water} wiring=${tile.wiring}`,
-      )
-      return tile
-    })
+    const key = tile ? `${tile.mapX},${tile.mapY}` : ""
+    if (key === lastHoverKeyRef.current) return
+    lastHoverKeyRef.current = key
+    setHover(tile)
+    if (!tile) {
+      onHoverChangeRef.current("Hover a tile to inspect it.")
+      return
+    }
+    onHoverChangeRef.current(
+      `hover tile=(${tile.mapX}, ${tile.mapY}) fg=${tile.fg} bg=${tile.bg} water=${tile.water} wiring=${tile.wiring}`,
+    )
   }, [])
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
@@ -365,25 +372,27 @@ function MinimapPanelImpl({ minimap, playerPosition, currentWorld, onHoverChange
     const canvas = canvasRef.current
     if (!canvas) return
     const handler = (e: WheelEvent) => {
-      if (!minimap) return
+      if (!minimapRef.current) return
       e.preventDefault()
       const rect = canvas.getBoundingClientRect()
       const cx = e.clientX - rect.left
       const cy = e.clientY - rect.top
       const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
+      const halfW = canvas.clientWidth / 2
+      const halfH = canvas.clientHeight / 2
       setView((v) => {
         const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor))
-        const ratio = nextZoom / v.zoom
+        const ratio = v.zoom > 0 ? nextZoom / v.zoom : 1
         return {
           zoom: nextZoom,
-          panX: cx - (cx - v.panX) * ratio,
-          panY: cy - (cy - v.panY) * ratio,
+          panX: cx - halfW - (cx - halfW - v.panX) * ratio,
+          panY: cy - halfH - (cy - halfH - v.panY) * ratio,
         }
       })
     }
     canvas.addEventListener("wheel", handler, { passive: false })
     return () => canvas.removeEventListener("wheel", handler)
-  }, [minimap])
+  }, [])
 
   return (
     <div className="relative h-80 overflow-hidden rounded-2xl border border-white/10 bg-[#081018]">
