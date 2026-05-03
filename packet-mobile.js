@@ -9,8 +9,8 @@
 
 const TARGET_MODULE = "libil2cpp.so";
 
-const SEND_BSON_RVA = 0x2254D6C;
-const RECV_PACKET_RVA = 0x2294C64;
+const SEND_BSON_RVA = 0x228D2A8;
+const RECV_PACKET_RVA = 0x22CCF0C;
 
 // Current target is 64-bit IL2CPP. System.Byte[] layout:
 //   +0x18 = array length (int32)
