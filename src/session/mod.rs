@@ -3369,7 +3369,7 @@ async fn run_tutorial_script(
     session_id: String,
     logger: Logger,
     state: Arc<RwLock<SessionState>>,
-    _controller_tx: mpsc::Sender<ControllerEvent>,
+    controller_tx: mpsc::Sender<ControllerEvent>,
     outbound_tx: OutboundHandle,
 ) -> Result<(), String> {
     logger.state(
@@ -3666,20 +3666,23 @@ async fn run_tutorial_script(
     )
     .await?;
 
+    // mp (46, 45) + mP entry frame. Source: frida decode rec 280 — the
+    // legitimate client tags this packet with ANIM_WALK at x=14.61 (still
+    // walking onto the tile) before the player settles into idle.
     sleep(tutorial::portal_land_pause()).await;
     send_docs_exclusive(
         &outbound_tx,
         vec![
             protocol::make_map_point(46, 45),
-            protocol::make_movement_packet(14.63, 14.24, movement::ANIM_IDLE, movement::DIR_RIGHT, false),
+            protocol::make_movement_packet(14.61, 14.24, movement::ANIM_WALK, movement::DIR_RIGHT, false),
         ],
     )
     .await?;
-    set_local_world_position(&logger, &session_id, &state, 14.63, 14.24).await;
+    set_local_world_position(&logger, &session_id, &state, 14.61, 14.24).await;
     send_scheduler_cmd(
         &outbound_tx,
         SchedulerCommand::UpdateMovement {
-            world_x: 14.63,
+            world_x: 14.61,
             world_y: 14.24,
             is_moving: false,
             anim: movement::ANIM_IDLE,
@@ -3688,21 +3691,9 @@ async fn run_tutorial_script(
     )
     .await?;
 
+    // First idle settle on (46, 45). Source: frida decode rec 282 — mP at
+    // x=14.71 with ANIM_IDLE once the player stops walking.
     sleep(tutorial::portal_land_pause()).await;
-    send_docs_exclusive(
-        &outbound_tx,
-        vec![protocol::make_movement_packet(
-            14.63,
-            14.24,
-            movement::ANIM_IDLE,
-            movement::DIR_RIGHT,
-            false,
-        )],
-    )
-    .await?;
-    set_local_world_position(&logger, &session_id, &state, 14.63, 14.24).await;
-
-    sleep(tutorial::portal_settle_pause()).await;
     send_docs_exclusive(
         &outbound_tx,
         vec![protocol::make_movement_packet(
@@ -3715,10 +3706,26 @@ async fn run_tutorial_script(
     )
     .await?;
     set_local_world_position(&logger, &session_id, &state, 14.71, 14.24).await;
+
+    // Second idle settle on (46, 45). Source: frida decode rec 284 — mP at
+    // x=14.72 (micro-wobble while waiting to trigger the portal).
+    sleep(tutorial::portal_settle_pause()).await;
+    send_docs_exclusive(
+        &outbound_tx,
+        vec![protocol::make_movement_packet(
+            14.72,
+            14.24,
+            movement::ANIM_IDLE,
+            movement::DIR_RIGHT,
+            false,
+        )],
+    )
+    .await?;
+    set_local_world_position(&logger, &session_id, &state, 14.72, 14.24).await;
     send_scheduler_cmd(
         &outbound_tx,
         SchedulerCommand::UpdateMovement {
-            world_x: 14.71,
+            world_x: 14.72,
             world_y: 14.24,
             is_moving: false,
             anim: movement::ANIM_IDLE,
@@ -3727,11 +3734,15 @@ async fn run_tutorial_script(
     )
     .await?;
 
+    // The legitimate client only emits two idle mP packets between arriving at
+    // (46, 45) and sending TState=6 + PAoP. The two extra idle frames below
+    // do not match the frida decode but keep the keepalive cadence consistent
+    // with the existing scheduler timing.
     sleep(tutorial::portal_walk_step_pause()).await;
     send_docs_exclusive(
         &outbound_tx,
         vec![protocol::make_movement_packet(
-            14.75,
+            14.72,
             14.24,
             movement::ANIM_IDLE,
             movement::DIR_RIGHT,
@@ -3739,11 +3750,11 @@ async fn run_tutorial_script(
         )],
     )
     .await?;
-    set_local_world_position(&logger, &session_id, &state, 14.75, 14.24).await;
+    set_local_world_position(&logger, &session_id, &state, 14.72, 14.24).await;
     send_scheduler_cmd(
         &outbound_tx,
         SchedulerCommand::UpdateMovement {
-            world_x: 14.75,
+            world_x: 14.72,
             world_y: 14.24,
             is_moving: false,
             anim: movement::ANIM_IDLE,
@@ -3756,7 +3767,7 @@ async fn run_tutorial_script(
     send_docs_exclusive(
         &outbound_tx,
         vec![protocol::make_movement_packet(
-            14.75,
+            14.72,
             14.24,
             movement::ANIM_IDLE,
             movement::DIR_RIGHT,
@@ -3764,23 +3775,501 @@ async fn run_tutorial_script(
         )],
     )
     .await?;
-    set_local_world_position(&logger, &session_id, &state, 14.75, 14.24).await;
+    set_local_world_position(&logger, &session_id, &state, 14.72, 14.24).await;
 
     sleep(tutorial::portal_ready_pause()).await;
-    // send_docs_exclusive(
-    //     &outbound_tx,
-    //     vec![
-    //         protocol::make_empty_movement(),
-    //         protocol::make_tstate(6),
-    //         protocol::make_activate_out_portal(46, 45),
-    //     ],
-    // )
-    // .await?;
+
+    // Phase 11: activate the out-portal (TState=6 + PAoP). Source: frida
+    // decode rec 294 — the legitimate client sends an empty mP, the TState
+    // transition and PAoP(46, 45) together once the player has settled on the
+    // portal tile.
+    logger.state(Some(&session_id), "tutorial automation: phase 11/portal-out");
+    send_docs_exclusive(
+        &outbound_tx,
+        vec![
+            protocol::make_empty_movement(),
+            protocol::make_tstate(6),
+            protocol::make_activate_out_portal(
+                tutorial::PORTAL_APPROACH_X,
+                tutorial::PORTAL_APPROACH_Y,
+            ),
+        ],
+    )
+    .await?;
+
+    // Phase 12: teleport to (65, 47) and ride the rocket shaft up to (65, 39).
+    sleep(tutorial::portal_teleport_pause()).await;
+    run_tutorial_portal_climb(&session_id, &logger, &state, &outbound_tx).await?;
+
+    // Phase 13: build four soil blocks around the landing tile.
+    sleep(tutorial::climb_to_build_pause()).await;
+    run_tutorial_build_phase(&outbound_tx).await?;
+
+    // Phase 14: hit each soil block until it spawns a gem.
+    sleep(tutorial::build_to_hit_pause()).await;
+    run_tutorial_hit_phase(&outbound_tx).await?;
+
+    // Phase 15: plant the soil seedling and fertilize it.
+    sleep(tutorial::hit_to_plant_pause()).await;
+    run_tutorial_plant_phase(&outbound_tx).await?;
+
+    // Phase 16: harvest the seedling.
+    sleep(tutorial::plant_to_harvest_pause()).await;
+    send_docs_exclusive(
+        &outbound_tx,
+        vec![
+            protocol::make_movement_packet(
+                tutorial::CLIMB_TOP_WORLD_X,
+                tutorial::CLIMB_TOP_WORLD_Y,
+                movement::ANIM_PUNCH,
+                movement::DIR_LEFT,
+                false,
+            ),
+            protocol::make_hit_block(tutorial::FARM_TARGET_X, tutorial::FARM_TARGET_Y),
+        ],
+    )
+    .await?;
+
+    // Phase 17: walk to each gem position and collect it.
+    sleep(tutorial::harvest_to_collect_pause()).await;
+    run_tutorial_collect_phase(&session_id, &logger, &state, &outbound_tx).await?;
+
+    // Phase 18: complete the NPC dialog by buying BasicClothes and equipping
+    // the three wearable blocks the server hands back.
+    sleep(tutorial::collect_to_npc_pause()).await;
+    run_tutorial_npc_phase(&outbound_tx).await?;
+
+    // Phase 19: leave TUTORIAL2 and trigger the join to PIXELSTATION via the
+    // existing session machinery (which handles TTjW + Gw + GWC + RtP).
+    sleep(tutorial::equip_to_leave_pause()).await;
+    logger.state(Some(&session_id), "tutorial automation: phase 19/leave-tutorial");
+    send_docs_exclusive(
+        &outbound_tx,
+        vec![protocol::make_tstate(7), protocol::make_leave_world()],
+    )
+    .await?;
+    {
+        let mut state = state.write().await;
+        state.current_world = None;
+        state.pending_world = Some(tutorial::POST_TUTORIAL_WORLD.to_string());
+        state.status = SessionStatus::MenuReady;
+        state.collectables.clear();
+        state.other_players.clear();
+        state.world = None;
+        state.world_foreground_tiles.clear();
+        state.world_background_tiles.clear();
+        state.world_water_tiles.clear();
+        state.world_wiring_tiles.clear();
+    }
+
+    // Phase 20: join PIXELSTATION. The session command handler sends the
+    // TTjW packet and the per-world Gw/GSb chain (lines 1419-1453) when the
+    // server replies with WN=PIXELSTATION.
+    sleep(tutorial::leave_to_join_pause()).await;
+    logger.state(Some(&session_id), "tutorial automation: phase 20/pixelstation");
+    controller_tx
+        .send(ControllerEvent::Command(SessionCommand::JoinWorld {
+            world: tutorial::POST_TUTORIAL_WORLD.to_string(),
+            instance: false,
+        }))
+        .await
+        .map_err(|error| error.to_string())?;
+
+    // Wait for PIXELSTATION to come online so the caller sees a clean
+    // "tutorial complete" state.
+    let deadline = Instant::now() + tutorial::post_tutorial_world_timeout();
+    loop {
+        {
+            let state = state.read().await;
+            if state.current_world.as_deref() == Some(tutorial::POST_TUTORIAL_WORLD)
+                && state.status == SessionStatus::InWorld
+            {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting to enter {}",
+                tutorial::POST_TUTORIAL_WORLD
+            ));
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
 
     logger.state(
         Some(&session_id),
-        "tutorial automation: phase 10",
+        "tutorial automation: phase 21/complete",
     );
+    Ok(())
+}
+
+async fn run_tutorial_portal_climb(
+    session_id: &str,
+    logger: &Logger,
+    state: &Arc<RwLock<SessionState>>,
+    outbound_tx: &OutboundHandle,
+) -> Result<(), String> {
+    // Step 1: mp(65, 47) + mP at world (20.8, 14.88) + PAiP. The bot reports
+    // its own portal arrival to the server. Source: frida decode rec 298.
+    send_docs_exclusive(
+        outbound_tx,
+        vec![
+            protocol::make_map_point(tutorial::PORTAL_ENTRY_X, tutorial::PORTAL_ENTRY_Y),
+            protocol::make_movement_packet(
+                tutorial::CLIMB_TOP_WORLD_X,
+                tutorial::CLIMB_ENTRY_WORLD_Y,
+                movement::ANIM_IDLE,
+                movement::DIR_RIGHT,
+                false,
+            ),
+            protocol::make_portal_arrive(tutorial::PORTAL_ENTRY_X, tutorial::PORTAL_ENTRY_Y),
+        ],
+    )
+    .await?;
+    set_local_world_position(
+        logger,
+        session_id,
+        state,
+        tutorial::CLIMB_TOP_WORLD_X,
+        tutorial::CLIMB_ENTRY_WORLD_Y,
+    )
+    .await;
+    send_scheduler_cmd(
+        outbound_tx,
+        SchedulerCommand::UpdateMovement {
+            world_x: tutorial::CLIMB_TOP_WORLD_X,
+            world_y: tutorial::CLIMB_ENTRY_WORLD_Y,
+            is_moving: false,
+            anim: movement::ANIM_IDLE,
+            direction: movement::DIR_RIGHT,
+        },
+    )
+    .await?;
+
+    // Steps 2-5: ride up through the rocket shaft. The legitimate client
+    // groups several tiles into a single mp packet when crossing them in one
+    // tick. Source: frida decode rec 300-306.
+    for (index, (tiles, world_y, anim)) in tutorial::CLIMB_STEPS.iter().enumerate() {
+        let pause = if index == 0 {
+            tutorial::climb_step_long_pause()
+        } else {
+            tutorial::climb_step_short_pause()
+        };
+        sleep(pause).await;
+
+        send_docs_exclusive(
+            outbound_tx,
+            vec![
+                protocol::make_map_point_multi(tiles),
+                protocol::make_movement_packet(
+                    tutorial::CLIMB_TOP_WORLD_X,
+                    *world_y,
+                    *anim,
+                    movement::DIR_RIGHT,
+                    false,
+                ),
+            ],
+        )
+        .await?;
+        set_local_world_position(
+            logger,
+            session_id,
+            state,
+            tutorial::CLIMB_TOP_WORLD_X,
+            *world_y,
+        )
+        .await;
+        send_scheduler_cmd(
+            outbound_tx,
+            SchedulerCommand::UpdateMovement {
+                world_x: tutorial::CLIMB_TOP_WORLD_X,
+                world_y: *world_y,
+                is_moving: *anim != movement::ANIM_IDLE,
+                anim: *anim,
+                direction: movement::DIR_RIGHT,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn run_tutorial_build_phase(outbound_tx: &OutboundHandle) -> Result<(), String> {
+    // BUp(soil) — select the soil block in the belt before placing it.
+    sleep(tutorial::build_select_pause()).await;
+    send_docs_exclusive(
+        outbound_tx,
+        vec![protocol::make_select_belt_item(tutorial::SOIL_PLACEMENT_BI)],
+    )
+    .await?;
+
+    // Place the four soil blocks in the same grouping the legitimate client
+    // uses (rec 354/356/362), then unselect the belt with BUp(0).
+    for (index, group) in tutorial::BUILD_GROUPS.iter().enumerate() {
+        sleep(tutorial::build_step_pause()).await;
+        let mut docs: Vec<Document> = vec![protocol::make_movement_packet(
+            tutorial::CLIMB_TOP_WORLD_X,
+            tutorial::CLIMB_TOP_WORLD_Y,
+            movement::ANIM_IDLE,
+            movement::DIR_RIGHT,
+            false,
+        )];
+        for (tx, ty) in group.iter() {
+            docs.push(protocol::make_place_block(*tx, *ty, tutorial::SOIL_BLOCK_ID));
+        }
+        // The final group also unselects the belt slot, matching rec 362.
+        if index == tutorial::BUILD_GROUPS.len() - 1 {
+            docs.push(protocol::make_select_belt_item(0));
+        }
+        send_docs_exclusive(outbound_tx, docs).await?;
+    }
+    Ok(())
+}
+
+async fn run_tutorial_hit_phase(outbound_tx: &OutboundHandle) -> Result<(), String> {
+    for (tile_index, (tx, ty)) in tutorial::BUILD_TARGETS.iter().enumerate() {
+        if tile_index > 0 {
+            sleep(tutorial::hit_tile_pause()).await;
+        }
+        for hit_index in 0..tutorial::HIT_COUNT_PER_TILE {
+            if hit_index > 0 {
+                sleep(tutorial::hit_step_pause()).await;
+            }
+            // Frida shows the bot alternating ANIM_PUNCH and ANIM_IDLE while
+            // hitting, with ANIM_PUNCH on the first hit of each tile. Source:
+            // frida decode rec 374/424/434 (a=6) vs rec 376/378 etc. (a=1).
+            let anim = if hit_index == 0 {
+                movement::ANIM_PUNCH
+            } else {
+                movement::ANIM_IDLE
+            };
+            send_docs_exclusive(
+                outbound_tx,
+                vec![
+                    protocol::make_movement_packet(
+                        tutorial::CLIMB_TOP_WORLD_X,
+                        tutorial::CLIMB_TOP_WORLD_Y,
+                        anim,
+                        movement::DIR_RIGHT,
+                        false,
+                    ),
+                    protocol::make_hit_block(*tx, *ty),
+                ],
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn run_tutorial_plant_phase(outbound_tx: &OutboundHandle) -> Result<(), String> {
+    // Plant the soil seedling at (64, 39). Source: frida decode rec 454/464.
+    send_docs_exclusive(
+        outbound_tx,
+        vec![protocol::make_select_belt_item(tutorial::SOIL_SEED_BI)],
+    )
+    .await?;
+    sleep(tutorial::build_step_pause()).await;
+    send_docs_exclusive(
+        outbound_tx,
+        vec![
+            protocol::make_movement_packet(
+                tutorial::CLIMB_TOP_WORLD_X,
+                tutorial::CLIMB_TOP_WORLD_Y,
+                movement::ANIM_IDLE,
+                movement::DIR_LEFT,
+                false,
+            ),
+            protocol::make_seed_block(
+                tutorial::FARM_TARGET_X,
+                tutorial::FARM_TARGET_Y,
+                tutorial::SOIL_BLOCK_ID,
+            ),
+            protocol::make_select_belt_item(0),
+        ],
+    )
+    .await?;
+
+    // Plant the fertilizer on the seedling tile. Source: frida decode rec
+    // 480/488.
+    sleep(tutorial::plant_fertilizer_pause()).await;
+    send_docs_exclusive(
+        outbound_tx,
+        vec![protocol::make_select_belt_item(tutorial::FERTILIZER_SEED_BI)],
+    )
+    .await?;
+    sleep(tutorial::build_step_pause()).await;
+    send_docs_exclusive(
+        outbound_tx,
+        vec![
+            protocol::make_movement_packet(
+                tutorial::CLIMB_TOP_WORLD_X,
+                tutorial::CLIMB_TOP_WORLD_Y,
+                movement::ANIM_PUNCH,
+                movement::DIR_LEFT,
+                false,
+            ),
+            protocol::make_seed_block(
+                tutorial::FARM_TARGET_X,
+                tutorial::FARM_TARGET_Y,
+                tutorial::FERTILIZER_BLOCK_ID,
+            ),
+            protocol::make_select_belt_item(0),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn run_tutorial_collect_phase(
+    session_id: &str,
+    logger: &Logger,
+    state: &Arc<RwLock<SessionState>>,
+    outbound_tx: &OutboundHandle,
+) -> Result<(), String> {
+    // Wait for the harvested seedling drop and the four gem drops to appear.
+    let deadline = Instant::now() + tutorial::full_collectable_timeout();
+    loop {
+        {
+            let snapshot = state.read().await;
+            if snapshot.collectables.len() >= tutorial::COLLECT_ORDER.len() {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            // Don't fail — the bot tries to collect whatever it has so the
+            // tutorial doesn't get stuck if a collectable is missed.
+            logger.warn(
+                "tutorial",
+                Some(session_id),
+                "timed out waiting for all five tutorial collectables",
+            );
+            break;
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+
+    // Walk to each known build target in collect order and request the
+    // collectable whose position matches that tile. The legitimate client
+    // walks left-then-right and finally jumps, but a server-authoritative
+    // position is enough for the C(CollectableID) request to succeed once
+    // the bot is on the same tile.
+    for (index, (tx, ty)) in tutorial::COLLECT_ORDER.iter().enumerate() {
+        if index > 0 {
+            sleep(tutorial::collect_step_pause()).await;
+        } else {
+            // First step: walk left to the seedling tile.
+            sleep(tutorial::collect_step_pause()).await;
+        }
+
+        let (world_x, world_y) = protocol::map_to_world(*tx as f64, *ty as f64);
+        let facing = if index == 0 {
+            movement::DIR_LEFT
+        } else {
+            movement::DIR_RIGHT
+        };
+
+        // Compute the matching CollectableID from state.collectables by
+        // tile match before we send anything (so we still issue the walk
+        // even when the gem hasn't been observed yet).
+        let collectable_id = {
+            let snapshot = state.read().await;
+            snapshot
+                .collectables
+                .values()
+                .find(|c| (c.pos_x.round() as i32, c.pos_y.round() as i32) == (*tx, *ty))
+                .map(|c| c.collectable_id)
+        };
+
+        let mut docs: Vec<Document> = vec![
+            protocol::make_map_point(*tx, *ty),
+            protocol::make_movement_packet(
+                world_x,
+                world_y,
+                movement::ANIM_WALK,
+                facing,
+                false,
+            ),
+        ];
+        if let Some(id) = collectable_id {
+            docs.push(protocol::make_collectable_request(id));
+        }
+        send_docs_exclusive(outbound_tx, docs).await?;
+        set_local_map_position(logger, session_id, state, *tx, *ty).await;
+        send_scheduler_cmd(
+            outbound_tx,
+            SchedulerCommand::UpdateMovement {
+                world_x,
+                world_y,
+                is_moving: false,
+                anim: movement::ANIM_IDLE,
+                direction: facing,
+            },
+        )
+        .await?;
+    }
+
+    // Mop up: collect anything still on the floor (defensive — in case the
+    // bot arrived at a tile before the nCo packet was processed).
+    let remaining: Vec<i32> = {
+        let snapshot = state.read().await;
+        snapshot.collectables.keys().copied().collect()
+    };
+    for id in remaining {
+        send_docs(
+            outbound_tx,
+            vec![protocol::make_collectable_request(id)],
+        )
+        .await?;
+        sleep(Duration::from_millis(120)).await;
+    }
+    Ok(())
+}
+
+async fn run_tutorial_npc_phase(outbound_tx: &OutboundHandle) -> Result<(), String> {
+    // Buy the BasicClothes pack. Source: frida decode rec 638.
+    send_docs_exclusive(
+        outbound_tx,
+        vec![
+            protocol::make_empty_movement(),
+            protocol::make_progress_signal(1),
+            protocol::make_buy_item_pack(tutorial::CLOTHES_PACK_ID),
+        ],
+    )
+    .await?;
+
+    // Send the partner action event. Source: frida decode rec 640.
+    sleep(tutorial::bipack_to_action_pause()).await;
+    send_docs_exclusive(
+        outbound_tx,
+        vec![
+            protocol::make_empty_movement(),
+            protocol::make_progress_signal(1),
+            protocol::make_action_event(tutorial::CLOTHES_PACK_AE),
+        ],
+    )
+    .await?;
+
+    // Equip the three reward blocks one at a time. Source: frida decode rec
+    // 774 (hBlock=741), 804 (hBlock=355) and 818 (hBlock=552).
+    sleep(tutorial::action_to_equip_pause()).await;
+    send_docs_exclusive(
+        outbound_tx,
+        vec![protocol::make_wear_item(tutorial::EQUIP_BLOCKS[0])],
+    )
+    .await?;
+    sleep(tutorial::equip_first_pause()).await;
+    send_docs_exclusive(
+        outbound_tx,
+        vec![protocol::make_wear_item(tutorial::EQUIP_BLOCKS[1])],
+    )
+    .await?;
+    sleep(tutorial::equip_second_pause()).await;
+    send_docs_exclusive(
+        outbound_tx,
+        vec![protocol::make_wear_item(tutorial::EQUIP_BLOCKS[2])],
+    )
+    .await?;
     Ok(())
 }
 
