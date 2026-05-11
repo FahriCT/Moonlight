@@ -464,15 +464,20 @@ pub fn make_update_location(location: &str) -> Document {
 }
 
 pub fn make_map_point(map_x: i32, map_y: i32) -> Document {
-    let mut point = Vec::with_capacity(8);
-    point.extend_from_slice(&map_x.to_le_bytes());
-    point.extend_from_slice(&map_y.to_le_bytes());
+    make_map_point_multi(&[(map_x, map_y)])
+}
 
+pub fn make_map_point_multi(points: &[(i32, i32)]) -> Document {
+    let mut bytes = Vec::with_capacity(points.len() * 8);
+    for (x, y) in points {
+        bytes.extend_from_slice(&x.to_le_bytes());
+        bytes.extend_from_slice(&y.to_le_bytes());
+    }
     doc! {
         "ID": ids::PACKET_ID_MAP_POINT,
         "pM": Bson::Binary(Binary {
             subtype: BinarySubtype::Generic,
-            bytes: point,
+            bytes,
         })
     }
 }
@@ -642,9 +647,44 @@ pub fn world_to_map(world_x: f64, world_y: f64) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_batch, extract_messages, make_ready_to_play_with_st, make_vchk,
-        make_world_enter_ready, wrap_batch,
+        encode_batch, extract_messages, make_map_point, make_map_point_multi,
+        make_ready_to_play_with_st, make_vchk, make_world_enter_ready, wrap_batch,
     };
+    use bson::Bson;
+
+    #[test]
+    fn map_point_multi_encodes_each_tile_as_two_i32_le() {
+        let doc = make_map_point_multi(&[(65, 44), (65, 43), (65, 42), (65, 41)]);
+        let bson = doc.get("pM").expect("pM field exists");
+        let bytes = match bson {
+            Bson::Binary(binary) => &binary.bytes,
+            other => panic!("expected binary pM field, got {other:?}"),
+        };
+        assert_eq!(bytes.len(), 32);
+        // 65 == 0x41 (LE) followed by 44/43/42/41 as i32 LE.
+        let expected: &[u8] = &[
+            0x41, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, // (65, 44)
+            0x41, 0x00, 0x00, 0x00, 0x2B, 0x00, 0x00, 0x00, // (65, 43)
+            0x41, 0x00, 0x00, 0x00, 0x2A, 0x00, 0x00, 0x00, // (65, 42)
+            0x41, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, // (65, 41)
+        ];
+        assert_eq!(bytes.as_slice(), expected);
+    }
+
+    #[test]
+    fn map_point_falls_back_to_single_tile_payload() {
+        let doc = make_map_point(46, 45);
+        let bson = doc.get("pM").expect("pM field exists");
+        let bytes = match bson {
+            Bson::Binary(binary) => &binary.bytes,
+            other => panic!("expected binary pM field, got {other:?}"),
+        };
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(
+            bytes.as_slice(),
+            &[0x2E, 0x00, 0x00, 0x00, 0x2D, 0x00, 0x00, 0x00],
+        );
+    }
 
     #[test]
     fn batch_round_trip_preserves_messages() {
