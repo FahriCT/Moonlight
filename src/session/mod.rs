@@ -3666,20 +3666,23 @@ async fn run_tutorial_script(
     )
     .await?;
 
+    // mp (46, 45) + mP entry frame. Source: frida decode rec 280 — the
+    // legitimate client tags this packet with ANIM_WALK at x=14.61 (still
+    // walking onto the tile) before the player settles into idle.
     sleep(tutorial::portal_land_pause()).await;
     send_docs_exclusive(
         &outbound_tx,
         vec![
             protocol::make_map_point(46, 45),
-            protocol::make_movement_packet(14.63, 14.24, movement::ANIM_IDLE, movement::DIR_RIGHT, false),
+            protocol::make_movement_packet(14.61, 14.24, movement::ANIM_WALK, movement::DIR_RIGHT, false),
         ],
     )
     .await?;
-    set_local_world_position(&logger, &session_id, &state, 14.63, 14.24).await;
+    set_local_world_position(&logger, &session_id, &state, 14.61, 14.24).await;
     send_scheduler_cmd(
         &outbound_tx,
         SchedulerCommand::UpdateMovement {
-            world_x: 14.63,
+            world_x: 14.61,
             world_y: 14.24,
             is_moving: false,
             anim: movement::ANIM_IDLE,
@@ -3688,21 +3691,9 @@ async fn run_tutorial_script(
     )
     .await?;
 
+    // First idle settle on (46, 45). Source: frida decode rec 282 — mP at
+    // x=14.71 with ANIM_IDLE once the player stops walking.
     sleep(tutorial::portal_land_pause()).await;
-    send_docs_exclusive(
-        &outbound_tx,
-        vec![protocol::make_movement_packet(
-            14.63,
-            14.24,
-            movement::ANIM_IDLE,
-            movement::DIR_RIGHT,
-            false,
-        )],
-    )
-    .await?;
-    set_local_world_position(&logger, &session_id, &state, 14.63, 14.24).await;
-
-    sleep(tutorial::portal_settle_pause()).await;
     send_docs_exclusive(
         &outbound_tx,
         vec![protocol::make_movement_packet(
@@ -3715,10 +3706,26 @@ async fn run_tutorial_script(
     )
     .await?;
     set_local_world_position(&logger, &session_id, &state, 14.71, 14.24).await;
+
+    // Second idle settle on (46, 45). Source: frida decode rec 284 — mP at
+    // x=14.72 (micro-wobble while waiting to trigger the portal).
+    sleep(tutorial::portal_settle_pause()).await;
+    send_docs_exclusive(
+        &outbound_tx,
+        vec![protocol::make_movement_packet(
+            14.72,
+            14.24,
+            movement::ANIM_IDLE,
+            movement::DIR_RIGHT,
+            false,
+        )],
+    )
+    .await?;
+    set_local_world_position(&logger, &session_id, &state, 14.72, 14.24).await;
     send_scheduler_cmd(
         &outbound_tx,
         SchedulerCommand::UpdateMovement {
-            world_x: 14.71,
+            world_x: 14.72,
             world_y: 14.24,
             is_moving: false,
             anim: movement::ANIM_IDLE,
@@ -3727,11 +3734,15 @@ async fn run_tutorial_script(
     )
     .await?;
 
+    // The legitimate client only emits two idle mP packets between arriving at
+    // (46, 45) and sending TState=6 + PAoP. The two extra idle frames below
+    // do not match the frida decode but keep the keepalive cadence consistent
+    // with the existing scheduler timing.
     sleep(tutorial::portal_walk_step_pause()).await;
     send_docs_exclusive(
         &outbound_tx,
         vec![protocol::make_movement_packet(
-            14.75,
+            14.72,
             14.24,
             movement::ANIM_IDLE,
             movement::DIR_RIGHT,
@@ -3739,11 +3750,11 @@ async fn run_tutorial_script(
         )],
     )
     .await?;
-    set_local_world_position(&logger, &session_id, &state, 14.75, 14.24).await;
+    set_local_world_position(&logger, &session_id, &state, 14.72, 14.24).await;
     send_scheduler_cmd(
         &outbound_tx,
         SchedulerCommand::UpdateMovement {
-            world_x: 14.75,
+            world_x: 14.72,
             world_y: 14.24,
             is_moving: false,
             anim: movement::ANIM_IDLE,
@@ -3756,7 +3767,7 @@ async fn run_tutorial_script(
     send_docs_exclusive(
         &outbound_tx,
         vec![protocol::make_movement_packet(
-            14.75,
+            14.72,
             14.24,
             movement::ANIM_IDLE,
             movement::DIR_RIGHT,
@@ -3764,7 +3775,7 @@ async fn run_tutorial_script(
         )],
     )
     .await?;
-    set_local_world_position(&logger, &session_id, &state, 14.75, 14.24).await;
+    set_local_world_position(&logger, &session_id, &state, 14.72, 14.24).await;
 
     sleep(tutorial::portal_ready_pause()).await;
     // send_docs_exclusive(
